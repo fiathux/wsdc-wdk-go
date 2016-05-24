@@ -11,10 +11,20 @@ import(
   "time"
   "encoding/binary"
   "crypto/rand"
+  "crypto/md5"
+  "crypto/sha1"
 )
 
-
 type UUID_t [16]byte //the UUID type
+
+//UUID 3/5 namespaces
+type UUID_NS UUID_t
+var NAMESPACE_DNS = UUID_NS{0x6b,0xa7,0xb8,0x10,0x9d,0xad,0x11,0xd1,0x80,0xb4,0x00,0xc0,0x4f,0xd4,0x30,0xc8}
+var NAMESPACE_URL = UUID_NS{0x6b,0xa7,0xb8,0x11,0x9d,0xad,0x11,0xd1,0x80,0xb4,0x00,0xc0,0x4f,0xd4,0x30,0xc8}
+var NAMESPACE_OID = UUID_NS{0x6b,0xa7,0xb8,0x12,0x9d,0xad,0x11,0xd1,0x80,0xb4,0x00,0xc0,0x4f,0xd4,0x30,0xc8}
+var NAMESPACE_X500 = UUID_NS{0x6b,0xa7,0xb8,0x14,0x9d,0xad,0x11,0xd1,0x80,0xb4,0x00,0xc0,0x4f,0xd4,0x30,0xc8}
+//Null UUID
+var UUID_NULL = UUID_t{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}
 
 var fristMAC [6]byte
 var offline = true
@@ -48,9 +58,9 @@ func genVariants(buf []byte,version byte) {
 }
 
 //UUID version 1
-func GenUUID1() UUID_t {
+func UUID1() UUID_t {
   if offline {
-    return GenUUID1f()
+    return UUID1r()
   }
   var rst UUID_t
   genTimestemp(rst[0:8])
@@ -60,8 +70,8 @@ func GenUUID1() UUID_t {
   return rst;
 }
 
-//UUID version 1 offline (with out MAC address)
-func GenUUID1f() UUID_t {
+//UUID version 1 without network address
+func UUID1r() UUID_t {
   var rst UUID_t
   genTimestemp(rst[0:8])
   rand.Read(rst[8:16])
@@ -69,16 +79,38 @@ func GenUUID1f() UUID_t {
   return rst;
 }
 
+//UUID version 3
+func UUID3(ns UUID_NS,name []byte) UUID_t {
+  var rst UUID_t
+  reqstr := make([]byte,len(ns)+len(name))
+  copy(reqstr[copy(reqstr,ns[:]):],name)
+  pem := md5.Sum(reqstr)
+  copy(rst[0:16],pem[0:16])
+  genVariants(rst[0:16],3)
+  return rst;
+}
+
 //UUID version 4
-func GenUUID4() UUID_t {
+func UUID4() UUID_t {
   var rst UUID_t
   rand.Read(rst[0:16])
   genVariants(rst[0:16],4)
   return rst;
 }
 
-func NullUUID() UUID_t {
-  return UUID_t{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}
+//UUID version 5
+func UUID5(ns UUID_NS,name []byte) UUID_t {
+  var rst UUID_t
+  reqstr := make([]byte,len(ns)+len(name))
+  copy(reqstr[copy(reqstr,ns[:]):],name)
+  pem := sha1.Sum(reqstr)
+  copy(rst[0:16],pem[0:16])
+  genVariants(rst[0:16],5)
+  return rst;
+}
+
+func UUIDNull() UUID_t {
+  return UUID_NULL
 }
 
 //UUID to string
@@ -89,5 +121,5 @@ func (uid UUID_t) String() string {
 }
 
 func (uid UUID_t) IsNull() bool {
-  return uid == UUID_t{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}
+  return uid == UUID_NULL
 }
