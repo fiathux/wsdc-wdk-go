@@ -10,6 +10,8 @@ import(
   "net"
   "time"
   "encoding/binary"
+  "strings"
+  "encoding/hex"
   "crypto/rand"
   "crypto/md5"
   "crypto/sha1"
@@ -25,6 +27,8 @@ var NAMESPACE_OID = UUID_NS{0x6b,0xa7,0xb8,0x12,0x9d,0xad,0x11,0xd1,0x80,0xb4,0x
 var NAMESPACE_X500 = UUID_NS{0x6b,0xa7,0xb8,0x14,0x9d,0xad,0x11,0xd1,0x80,0xb4,0x00,0xc0,0x4f,0xd4,0x30,0xc8}
 //Null UUID
 var UUID_NULL = UUID_t{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}
+
+var GROUPS_UUID_B = []int{4,2,2,2,6}
 
 var fristMAC [6]byte
 var offline = true
@@ -109,8 +113,29 @@ func UUID5(ns UUID_NS,name []byte) UUID_t {
   return rst;
 }
 
+//Null UUID
 func UUIDNull() UUID_t {
   return UUID_NULL
+}
+
+//UUID from string
+func UUIDFrom(uuid_string string) (UUID_t,bool) {
+  spid := strings.Split(uuid_string,"-")
+  if len(spid) != 5 || len(spid[0]) != 8 || len(spid[1]) != 4 || len(spid[2]) != 4 ||
+  len(spid[3]) != 4 || len(spid[4]) != 12 {
+    return UUIDNull(),false
+  }
+  rst := UUID_t{}
+  fillStart := 0
+  for i:=0;i<5;i++ {
+    clip,err := hex.DecodeString(spid[i])
+    if err!=nil {
+      return UUIDNull(),false
+    }
+    copy(rst[fillStart:fillStart+GROUPS_UUID_B[i]],clip)
+    fillStart+=GROUPS_UUID_B[i]
+  }
+  return rst,true
 }
 
 //UUID to string
