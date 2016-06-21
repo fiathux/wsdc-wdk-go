@@ -7,6 +7,8 @@ import (
   _"regexp"
 )
 
+const PROTOCOL_MODULE_FRAMELEN = 65536
+
 // ------------------------ TYPE DEFINE ------------------------{{{
 
 type trackFeature int   //Identification feature
@@ -97,6 +99,30 @@ func serviceRefDec(serv uuid.UUID_t) {
     if tabServiceRef[serv] == 0 {
       delete(tabServiceRef,serv)
     }
+  }
+}
+
+type mPotoFrame_t struct {
+  id uuid.UUID_t
+  data []byte
+  command string
+  tag mPotoTag_t
+}
+
+type mPotoIter_t func([]byte)(mPotoFrame_t,mPotoIter_t)
+type mPotoTag_t uint
+type MPotoTag_t mPotoTag_t
+const (
+  MPROTO_DATA mPotoTag_t = iota
+  MPROTO_CONNECT
+  MPROTO_DISCONNECT
+  MPROTO_LAST         //Write last frame
+)
+
+func moduleProtocol() mPotoIter_t {
+  //frmbuff := make([]byte,0,PROTOCOL_MODULE_FRAMELEN)
+  return func([]byte) (mPotoFrame_t,mPotoIter_t) {
+    return mPotoFrame_t{},nil
   }
 }
 
@@ -206,9 +232,9 @@ func QuickBindTrack(rule string,name string,servA uuid.UUID_t,servB uuid.UUID_t)
     //
   case rule == "P":   //Point to point format
     //
-  case rule == "T#":  //Transparent hash distrabute
+  case rule[0:2] == "M*":  //Subscript module-format broadcast (buffered)
     //
-  case rule == "M#":  //Module-format hash distrabute
+  case rule[0:2] == "M#":  //Module-format hash distrabute (buffered)
     //
   }
   return uuid.UUIDNull()
@@ -340,5 +366,4 @@ func WriteTo(service uuid.UUID_t,session uuid.UUID_t,data []byte) bool {
 }
 
 // ------------------------ MODULE PUBLIC METHOD END ------------------------}}}
-
 

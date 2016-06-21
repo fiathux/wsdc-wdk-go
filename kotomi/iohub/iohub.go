@@ -88,6 +88,7 @@ const (
   SEVT_DOWN                         //Event disconnected
   SEVT_TEST                         //Event life test
   SEVT_TERM                         //Event send terminate data(send and close)
+  SEVT_SENTFAL                      //Event failed data send
 )
 // ------------------------ TYPE DEFINE END ------------------------ }}}
 
@@ -100,7 +101,9 @@ type ListenerDgram_i interface {
 }
 
 type Session_i interface {
-  getID() uuid.UUID_t
+  GetID() uuid.UUID_t
+  GetAddr() string
+  GetLife() time.Time
   getBody() *session_t
   ifOutDate() bool
   terminate()
@@ -115,10 +118,10 @@ type Service_i interface {
   KillSession(SessionID uuid.UUID_t)
   UpdateSessionLife(SessionID uuid.UUID_t,life time.Time) bool
   HasSession(SessionID uuid.UUID_t) bool
-  CountSession() int
+  GetSession(SessionID uuid.UUID_t) (Session_i,bool)
+  EnumSession()[]Session_i
   Terminate()
   //Private:
-  getSession(SessionID uuid.UUID_t) (Session_i,bool)
   setSession(SessionObj Session_i) bool
   removeSession(SessionID uuid.UUID_t)
   clearSession()
@@ -193,7 +196,7 @@ func writeDistributor (service service_t){
         return
       }
     case frm:=<-service.wBuffer:
-      ses,_ := service.getSession(frm.ID)
+      ses,_ := service.GetSession(frm.ID)
       if ses != nil {
         ses_t := ses.getBody()
         select {
@@ -255,7 +258,7 @@ func startStreamAcceptor(service *serviceStream_t,nettype NetType){
         recvlen,err := s.sk.Read(buf[:])
         fmt.Println("Read data length",recvlen)
         if err!=nil || recvlen==0 {
-          service.rBuffer <- Frame_t{ID:s.id,Data:buf[0:recvlen],Err:err,Event:SEVT_DOWN}
+          //service.rBuffer <- Frame_t{ID:s.id,Data:buf[0:recvlen],Err:err,Event:SEVT_DOWN}
           s.terminate()
           return
         }else{
@@ -268,8 +271,17 @@ func startStreamAcceptor(service *serviceStream_t,nettype NetType){
       defer fmt.Println("Stop session WRITER")
       defer func(){
         fmt.Println("Close session",s.id)
-        service.removeSession(s.getID())
-        s.sk.Close()
+        service.removeSession(s.GetID())
+        for {
+          select{
+          case frm := <-s.wBuffer:
+            service.rBuffer <- Frame_t{ID:s.id,Data:frm.Data,Err:err,Event:SEVT_SENTFAL}
+          default:
+            service.rBuffer <- Frame_t{ID:s.id,Data:make([]byte,0),Err:err,Event:SEVT_DOWN}
+            s.sk.Close()
+            return
+          }
+        }
       }()
       for{
         select {
@@ -283,6 +295,7 @@ func startStreamAcceptor(service *serviceStream_t,nettype NetType){
             if err != nil {
               //Todo: report write error(if exist)
               fmt.Println("Exit session [write error]",s.id)
+              service.rBuffer <- Frame_t{ID:s.id,Data:frm.Data,Err:err,Event:SEVT_SENTFAL}
               return
             }
           }
@@ -335,8 +348,16 @@ func startDgramRWProc(service *servicePacket_t,nettype NetType) {
         defer fmt.Println("Stop Gram session WRITER")
         defer func(){
           fmt.Println("Close session",s.id)
-          service.rBuffer <- Frame_t{ ID:recvID,Data:make([]byte,0),Event:SEVT_DOWN }
-          service.removeSession(s.getID())
+          service.removeSession(s.GetID())
+          for {
+            select{
+            case frm := <-s.wBuffer:
+              service.rBuffer <- Frame_t{ID:s.id,Data:frm.Data,Err:err,Event:SEVT_SENTFAL}
+            default:
+              service.rBuffer <- Frame_t{ ID:recvID,Data:make([]byte,0),Event:SEVT_DOWN }
+              return
+            }
+          }
         }()
         for{
           select {
@@ -350,6 +371,7 @@ func startDgramRWProc(service *servicePacket_t,nettype NetType) {
               if err != nil {
                 //Todo: report write error(if exist)
                 fmt.Println("Exit session [write error]",s.id)
+                service.rBuffer <- Frame_t{ID:s.id,Data:frm.Data,Err:err,Event:SEVT_SENTFAL}
                 return
               }
             }
@@ -465,7 +487,7 @@ func (s *service_t) Write(DataFrame Frame_t) bool {
   defer s.sessionLock.RUnlock()
   if (DataFrame.ID.IsNull() || DataFrame.ID == s.id) && DataFrame.Event == SEVT_BCAST {
     for _,i := range s.children {
-      s.wBuffer <- Frame_t{ID:i.getID(), Data:DataFrame.Data}
+      s.wBuffer <- Frame_t{ID:i.GetID(), Data:DataFrame.Data}
     }
     return true
   }else{
@@ -501,7 +523,7 @@ func (s *service_t) CountSession() int {
   return len(s.children)
 }
 
-func (s *service_t) getSession(SessionID uuid.UUID_t) (Session_i,bool) {
+func (s *service_t) GetSession(SessionID uuid.UUID_t) (Session_i,bool) {
   s.sessionLock.RLock()
   defer s.sessionLock.RUnlock()
   ses,ok := s.children[SessionID]
@@ -550,6 +572,16 @@ func (s *service_t) KillSession(SessionID uuid.UUID_t) {
   }
 }
 
+func (s *service_t) EnumSession() []Session_i {
+  s.sessionLock.RLock()
+  defer s.sessionLock.RUnlock()
+  rst := make([]Session_i,0,len(s.children))
+  for _,v :=range s.children {
+    rst = append(rst,v)
+  }
+  return rst
+}
+
 func (s *service_t) Terminate() {
   s.clearSession()
   for {
@@ -594,8 +626,12 @@ func (s *servicePacket_t) GetAddr() string {
 
 //Session method {{{
 
-func (s *session_t) getID() uuid.UUID_t {
+func (s *session_t) GetID() uuid.UUID_t {
   return s.id;
+}
+
+func (s *session_t) GetLife() time.Time {
+  return s.life
 }
 
 func (s *session_t) terminate() {
@@ -614,8 +650,16 @@ func (s *sessionStream_t) getBody() *session_t {
   return &s.session_t;
 }
 
+func (s *sessionStream_t) GetAddr() string {
+  return s.sk.RemoteAddr().String();
+}
+
 func (s *sessionDgram_t) getBody() *session_t {
   return &s.session_t;
+}
+
+func (s *sessionDgram_t) GetAddr() string {
+  return s.sk.RemoteAddr().String();
 }
 //}}}
 
