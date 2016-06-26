@@ -187,8 +187,8 @@ from uuid.UUID_t,nettype NetType){
 
 //Write distributor
 func writeDistributor (service service_t){
-  fmt.Println("Start service W-DISTR")
-  defer fmt.Println("Stop service W-DISTR")
+  //fmt.Println("Start service W-DISTR")
+  //defer fmt.Println("Stop service W-DISTR")
   for{
     select {
     case exitsig:=<-service.term:
@@ -211,8 +211,8 @@ func writeDistributor (service service_t){
 
 //Read distributor
 func ReadDistributor (service service_t){
-  fmt.Println("Start service R-DISTR")
-  defer fmt.Println("Stop service R-DISTR")
+  //fmt.Println("Start service R-DISTR")
+  //defer fmt.Println("Stop service R-DISTR")
   for{
     select {
     case exitsig:=<-service.term:
@@ -220,7 +220,7 @@ func ReadDistributor (service service_t){
         return
       }
     case frm:=<-service.rBuffer:
-      fmt.Println("Read distributing...")
+      //fmt.Println("Read distributing...")
       func (){
         service.readerLock.RLock()
         defer service.readerLock.RUnlock()
@@ -251,12 +251,12 @@ func startStreamAcceptor(service *serviceStream_t,nettype NetType){
       service.rBuffer <- Frame_t{ID:s.id,Data:make([]byte,0),Err:nil,Event:SEVT_CONNECT}
     }(&ses)
     go func(s *sessionStream_t){//Reader
-      fmt.Println("Start session READER")
-      defer fmt.Println("Stop session READER")
+      //fmt.Println("Start session READER")
+      //defer fmt.Println("Stop session READER")
       for{
         buf := [NETBUFFER_SIZE]byte{}
         recvlen,err := s.sk.Read(buf[:])
-        fmt.Println("Read data length",recvlen)
+        //fmt.Println("Read data length",recvlen)
         if err!=nil || recvlen==0 {
           //service.rBuffer <- Frame_t{ID:s.id,Data:buf[0:recvlen],Err:err,Event:SEVT_DOWN}
           s.terminate()
@@ -267,8 +267,8 @@ func startStreamAcceptor(service *serviceStream_t,nettype NetType){
       }
     }(&ses)
     go func(s *sessionStream_t){//Writer
-      fmt.Println("Start session WRITER")
-      defer fmt.Println("Stop session WRITER")
+      //fmt.Println("Start session WRITER")
+      //defer fmt.Println("Stop session WRITER")
       defer func(){
         fmt.Println("Close session",s.id)
         service.removeSession(s.GetID())
@@ -294,7 +294,7 @@ func startStreamAcceptor(service *serviceStream_t,nettype NetType){
             _,err := s.sk.Write(frm.Data)
             if err != nil {
               //Todo: report write error(if exist)
-              fmt.Println("Exit session [write error]",s.id)
+              //fmt.Println("Exit session [write error]",s.id)
               service.rBuffer <- Frame_t{ID:s.id,Data:frm.Data,Err:err,Event:SEVT_SENTFAL}
               return
             }
@@ -344,8 +344,8 @@ func startDgramRWProc(service *servicePacket_t,nettype NetType) {
       frm.Event = SEVT_CONNECT
       //Writer {{{
       go func(s *sessionDgram_t) {
-        fmt.Println("Start Gram session WRITER")
-        defer fmt.Println("Stop Gram session WRITER")
+        //fmt.Println("Start Gram session WRITER")
+        //defer fmt.Println("Stop Gram session WRITER")
         defer func(){
           fmt.Println("Close session",s.id)
           service.removeSession(s.GetID())
@@ -370,7 +370,7 @@ func startDgramRWProc(service *servicePacket_t,nettype NetType) {
               _,err := service.sk.WriteTo(frm.Data,s.remoteAddr)
               if err != nil {
                 //Todo: report write error(if exist)
-                fmt.Println("Exit session [write error]",s.id)
+                //fmt.Println("Exit session [write error]",s.id)
                 service.rBuffer <- Frame_t{ID:s.id,Data:frm.Data,Err:err,Event:SEVT_SENTFAL}
                 return
               }
@@ -549,7 +549,7 @@ func (s *service_t) removeSession(SessionID uuid.UUID_t) {
   _,ok := s.children[SessionID]
   if ok {
     delete(s.children,SessionID)
-    fmt.Println("Remove session: ",SessionID," now keep:",len(s.children))
+    //fmt.Println("Remove session: ",SessionID," now keep:",len(s.children))
   }
 }
 
@@ -590,10 +590,10 @@ func (s *service_t) Terminate() {
     }
     time.Sleep(100*time.Millisecond)
   }
-  fmt.Println("Service session terminate [OK]")
+  //fmt.Println("Service session terminate [OK]")
   s.term <- true
   s.term <- true
-  fmt.Println("Service has been terminated!")
+  //fmt.Println("Service has been terminated!")
 }
 //}}}
 

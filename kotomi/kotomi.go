@@ -4,6 +4,7 @@ import (
   "github.com/fiathux/wsdc-wdk-go/rfc/uuid"
   "github.com/fiathux/wsdc-wdk-go/kotomi/iohub"
   "sync"
+  "encoding/binary"
   _"regexp"
 )
 
@@ -43,7 +44,7 @@ type ServiceInfo struct {
 }
 
 type trackFilter func(frm *iohub.Frame_t) (out []byte, dist []uuid.UUID_t)
-
+ 
 // ------------------------ TYPE DEFINE END ------------------------}}}
 
 // ------------------------ INTERFACE ------------------------{{{
@@ -109,7 +110,8 @@ type mPotoFrame_t struct {
   tag mPotoTag_t
 }
 
-type mPotoIter_t func([]byte)(mPotoFrame_t,mPotoIter_t)
+//Modules protocol process {{{
+type mPotoIter_t func(data []byte)(frmstack []mPotoFrame_t,nextparse mPotoIter_t)
 type mPotoTag_t uint
 type MPotoTag_t mPotoTag_t
 const (
@@ -119,12 +121,68 @@ const (
   MPROTO_LAST         //Write last frame
 )
 
-func moduleProtocol() mPotoIter_t {
-  //frmbuff := make([]byte,0,PROTOCOL_MODULE_FRAMELEN)
-  return func([]byte) (mPotoFrame_t,mPotoIter_t) {
-    return mPotoFrame_t{},nil
-  }
+const MPROTO_STACK_CAP = 4
+const MPROTO_HEAD_LEN int = 24
+const MPROTO_BODY_LEN int = PROTOCOL_MODULE_FRAMELEN - MPROTO_HEAD_LEN
+const MPROTO_MAGIC string = "TSP:"
+const MPROTO_CMD_SPLIT string = "\r\n"
+
+func moduleProtocolBuild() []mPotoFrame_t {
 }
+
+//Create module protocol parser{{{
+func moduleProtocolEntry() mPotoIter_t {
+  frmbuff := make([]byte,0,PROTOCOL_MODULE_FRAMELEN)
+  bodylen := 0
+  pf := mPotoFrame_t{}
+  var headParser mPotoIter_t
+  var bodyParser mPotoIter_t
+  //Head
+  headParser = func(data []byte) ([]mPotoFrame_t,mPotoIter_t) {
+    frmbuff = append(frmbuff,data...)
+    if len(frmbuff) < MPROTO_HEAD_LEN {
+      return nil,headParser
+    }else{
+      if string(frmbuff[0:4]) != MPROTO_MAGIC {
+        return nil,nil
+      }
+      copy(pf.id[:],frmbuff[4:20])
+      inflen := binary.BigEndian.Uint32(frmbuff[20:24])
+      pf.tag = mPotoTag_t(inflen>>28)
+      bodylen = int(inflen & 0x0fffffff)
+      if bodylen > MPROTO_BODY_LEN{
+        return nil,nil
+      }
+      return bodyParser(frmbuff[24:])
+    }
+  }
+  //Body
+  bodyParser = func(data []byte) ([]mPotoFrame_t,mPotoIter_t){
+    if len(data) < bodylen { return nil,bodyParser }
+    bdata := data[0:bodylen]
+    data = data[bodylen:]
+    stackFrm,flowPars := moduleProtocolEntry()(data)
+    pf.data = func () []byte{
+      for i:=2; i<len(bdata); i+=2 {
+        if string(bdata[i-2:i]) == MPROTO_CMD_SPLIT {
+          pf.command = string(bdata[0:i-2])
+          return bdata[i:]
+        }
+      }
+      return make([]byte,0)
+    }()
+    if stackFrm != nil {
+      return append(stackFrm,pf),flowPars
+    }else{
+      fmstack := make([]mPotoFrame_t,0,MPROTO_STACK_CAP);
+      return append(fmstack,pf),flowPars
+    }
+  }
+  return headParser
+}
+//}}}
+
+//}}}
 
 // ------------------------ MODULE PRIVATE METHOD END ------------------------}}}
 
@@ -228,6 +286,8 @@ func QuickBindTrack(rule string,name string,servA uuid.UUID_t,servB uuid.UUID_t)
   switch {
   case rule == "T":   //Transparent broadcast
     return BindTrack(name,nil,nil,servA,servB)
+  case rule == "C":   //Client to modlue-format
+    //
   case rule == "M":   //Module-format broadcast
     //
   case rule == "P":   //Point to point format
