@@ -191,10 +191,8 @@ func writeDistributor (service service_t){
   //defer fmt.Println("Stop service W-DISTR")
   for{
     select {
-    case exitsig:=<-service.term:
-      if exitsig {
+    case <-service.term:
         return
-      }
     case frm:=<-service.wBuffer:
       ses,_ := service.GetSession(frm.ID)
       if ses != nil {
@@ -215,10 +213,8 @@ func ReadDistributor (service service_t){
   //defer fmt.Println("Stop service R-DISTR")
   for{
     select {
-    case exitsig:=<-service.term:
-      if exitsig {
+    case <-service.term:
         return
-      }
     case frm:=<-service.rBuffer:
       //fmt.Println("Read distributing...")
       func (){
@@ -285,10 +281,8 @@ func startStreamAcceptor(service *serviceStream_t,nettype NetType){
       }()
       for{
         select {
-        case exitsig := <-s.term:
-          if exitsig {
+        case <-s.term:
             return
-          }
         case frm := <-s.wBuffer:
           if len(frm.Data) > 0 {
             _,err := s.sk.Write(frm.Data)
@@ -361,10 +355,8 @@ func startDgramRWProc(service *servicePacket_t,nettype NetType) {
         }()
         for{
           select {
-          case exitsig := <-ses.term:
-            if exitsig {
+          case <-ses.term:
               return
-            }
           case frm := <-s.wBuffer:
             if len(frm.Data) > 0 {
               _,err := service.sk.WriteTo(frm.Data,s.remoteAddr)
@@ -591,8 +583,7 @@ func (s *service_t) Terminate() {
     time.Sleep(100*time.Millisecond)
   }
   //fmt.Println("Service session terminate [OK]")
-  s.term <- true
-  s.term <- true
+  close(s.term)
   //fmt.Println("Service has been terminated!")
 }
 //}}}
@@ -635,11 +626,7 @@ func (s *session_t) GetLife() time.Time {
 }
 
 func (s *session_t) terminate() {
-  select {
-  case s.term <- true:
-  default:
-    return
-  }
+  close(s.term)
 }
 
 func (s *session_t) ifOutDate() bool {

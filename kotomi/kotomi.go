@@ -127,8 +127,8 @@ const MPROTO_BODY_LEN int = PROTOCOL_MODULE_FRAMELEN - MPROTO_HEAD_LEN
 const MPROTO_MAGIC string = "TSP:"
 const MPROTO_CMD_SPLIT string = "\r\n"
 
-func moduleProtocolBuild() []mPotoFrame_t {
-}
+/*func moduleProtocolBuild() []mPotoFrame_t {
+}*/
 
 //Create module protocol parser{{{
 func moduleProtocolEntry() mPotoIter_t {
