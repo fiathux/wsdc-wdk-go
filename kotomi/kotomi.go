@@ -26,8 +26,8 @@ type track_t struct {
   bindB iohub.Service_i
   bindFuncA uuid.UUID_t
   bindFuncB uuid.UUID_t
-  rdFilterA trackFilter
-  rdFilterB trackFilter
+  rdFilterA TrackFilter
+  rdFilterB TrackFilter
   name string
 }
 
@@ -43,7 +43,14 @@ type ServiceInfo struct {
   Addr string
 }
 
-type trackFilter func(frm *iohub.Frame_t) (out []byte, dist []uuid.UUID_t)
+type CommandInfo struct {
+  Id uuid.UUID_t
+  Cmd string
+}
+
+
+type TrackFilter func(frm *iohub.Frame_t) (out []byte, dist []uuid.UUID_t)
+type TrackCmdProc func(from uuid.UUID_t,command string)
  
 // ------------------------ TYPE DEFINE END ------------------------}}}
 
@@ -57,7 +64,10 @@ var tabService map[uuid.UUID_t] iohub.Service_i
 var tabTrack map[uuid.UUID_t] track_t
 var tabCallback map[uuid.UUID_t] iohub.Service_i        //Track or Callable mapping to Service
 var tabServiceRef map[uuid.UUID_t] int
+var tabCmdReader map[uuid.UUID_t] TrackCmdProc
+var cmdChannel chan CommandInfo
 var moduleSync sync.RWMutex
+var cmdProcSync sync.RWMutex
 
 //Initialization
 func init(){
@@ -65,7 +75,11 @@ func init(){
   tabTrack=make(map[uuid.UUID_t] track_t)
   tabCallback=make(map[uuid.UUID_t] iohub.Service_i)
   tabServiceRef=make(map[uuid.UUID_t] int)
+  tabCmdReader=make(map[uuid.UUID_t] TrackCmdProc)
+  cmdChannel=make(chan CommandInfo,10)
   moduleSync=sync.RWMutex{}
+  cmdProcSync=sync.RWMutex{}
+  go execCmdThr()
 }
 
 //Module read-lock decorator
@@ -107,40 +121,130 @@ type mPotoFrame_t struct {
   id uuid.UUID_t
   data []byte
   command string
-  tag mPotoTag_t
+  tag MPotoTag_t
 }
 
+// ------------------------ MODULE PRIVATE METHOD END ------------------------}}}
+
+// ------------------------ MODULE PUBLIC METHOD ------------------------{{{
+
+//Command process{{{
+
+func AddCmddListener(proc TrackCmdProc) uuid.UUID_t {
+  if proc == nil {return uuid.UUIDNull()}
+  cmdProcSync.Lock()
+  defer cmdProcSync.Unlock()
+  procid := uuid.UUID1()
+  tabCmdReader[procid] = proc
+  return procid
+}
+
+func RemoveCmdListener(id uuid.UUID_t){
+  cmdProcSync.Lock()
+  defer cmdProcSync.Unlock()
+  _,ok := tabCmdReader[id]
+  if ok {
+    delete(tabCmdReader,id)
+  }
+}
+
+func SendCmd(cmd CommandInfo) {
+  cmdChannel <- cmd
+}
+
+func execCmdThr(){
+  for {
+    cmd := <-cmdChannel
+    func(){
+      cmdProcSync.RLock()
+      defer cmdProcSync.RUnlock()
+      for _,vproc := range tabCmdReader {
+        go vproc(cmd.Id,cmd.Cmd)
+      }
+    }()
+  }
+}
+
+//}}}
+
 //Modules protocol process {{{
-type mPotoIter_t func(data []byte)(frmstack []mPotoFrame_t,nextparse mPotoIter_t)
-type mPotoTag_t uint
-type MPotoTag_t mPotoTag_t
+type MPotoIter_t func(data []byte)(frmstack []mPotoFrame_t,nextparse MPotoIter_t)
+type MPotoTag_t uint
 const (
-  MPROTO_DATA mPotoTag_t = iota
+  MPROTO_DATA MPotoTag_t = iota
   MPROTO_CONNECT
   MPROTO_DISCONNECT
   MPROTO_LAST         //Write last frame
 )
 
 const MPROTO_STACK_CAP = 4
-const MPROTO_HEAD_LEN int = 24
-const MPROTO_BODY_LEN int = PROTOCOL_MODULE_FRAMELEN - MPROTO_HEAD_LEN
+const ( //Module protocol head position
+  MPH_P_MAGIC = 0
+  MPH_E_MAGIC = 4
+  MPH_P_ID = 4
+  MPH_E_ID = 20
+  MPH_P_SUBS = 20
+  MPH_E_SUBS = 24
+  MPH_LEN = 24
+)
+const MPROTO_BODY_LEN int = PROTOCOL_MODULE_FRAMELEN - MPH_LEN
 const MPROTO_MAGIC string = "TSP:"
 const MPROTO_CMD_SPLIT string = "\r\n"
 
-/*func moduleProtocolBuild() []mPotoFrame_t {
-}*/
+//Encode date to module frame data
+func ModuleProtocolEnc(id uuid.UUID_t,data []byte,tag MPotoTag_t,command string) []byte {
+  var cmdByte []byte
+  var curTag uint32 = 0
+  firstFrame := true
+  result := make([]byte,0,MPROTO_STACK_CAP)
+  emptyCmdByte := []byte(MPROTO_CMD_SPLIT)
+  for {
+    curFram := make([]byte,MPH_LEN,PROTOCOL_MODULE_FRAMELEN)
+    copy(curFram[MPH_P_MAGIC:MPH_E_MAGIC],[]byte(MPROTO_MAGIC))
+    copy(curFram[MPH_P_ID:MPH_E_ID],id[:])
+    if firstFrame{
+      firstFrame = false
+      cmdByte = []byte(command + MPROTO_CMD_SPLIT)
+      if tag == MPotoTag_t(MPROTO_CONNECT) {
+        curTag = uint32(tag) << 28
+      }else{
+        curTag = 0
+      }
+    }else{
+      cmdByte = emptyCmdByte
+    }
+    if (len(data) + len(cmdByte)) < (PROTOCOL_MODULE_FRAMELEN - MPH_LEN) {
+      if tag == MPotoTag_t(MPROTO_DISCONNECT) || tag == MPotoTag_t(MPROTO_LAST) {
+        curTag = uint32(tag) << 28
+      }
+      bodyTagLen := uint32(len(data) + len(cmdByte)) | curTag
+      binary.BigEndian.PutUint32(curFram[MPH_P_SUBS:MPH_E_SUBS],bodyTagLen)
+      curFram = append(curFram,cmdByte...)
+      curFram = append(curFram,data...)
+      return append(result,curFram...)
+    }else{
+      cutlen := PROTOCOL_MODULE_FRAMELEN - MPH_LEN - len(cmdByte)
+      bodyTagLen := uint32(PROTOCOL_MODULE_FRAMELEN - MPH_LEN) | curTag
+      binary.BigEndian.PutUint32(curFram[MPH_P_SUBS:MPH_E_SUBS],bodyTagLen)
+      curFram = append(curFram,cmdByte...)
+      curFram = append(curFram,data[0:cutlen]...)
+      result = append(result,curFram...)
+      data = data[cutlen:]
+    }
+  }
+}
 
 //Create module protocol parser{{{
-func moduleProtocolEntry() mPotoIter_t {
+func ModuleProtocolEntry() MPotoIter_t {
   frmbuff := make([]byte,0,PROTOCOL_MODULE_FRAMELEN)
   bodylen := 0
   pf := mPotoFrame_t{}
-  var headParser mPotoIter_t
-  var bodyParser mPotoIter_t
+  var headParser MPotoIter_t
+  var bodyParser MPotoIter_t
   //Head
-  headParser = func(data []byte) ([]mPotoFrame_t,mPotoIter_t) {
+  headParser = func(data []byte) ([]mPotoFrame_t,MPotoIter_t) {
     frmbuff = append(frmbuff,data...)
-    if len(frmbuff) < MPROTO_HEAD_LEN {
+    if len(frmbuff) < MPH_LEN {
       return nil,headParser
     }else{
       if string(frmbuff[0:4]) != MPROTO_MAGIC {
@@ -148,7 +252,7 @@ func moduleProtocolEntry() mPotoIter_t {
       }
       copy(pf.id[:],frmbuff[4:20])
       inflen := binary.BigEndian.Uint32(frmbuff[20:24])
-      pf.tag = mPotoTag_t(inflen>>28)
+      pf.tag = MPotoTag_t(inflen>>28)
       bodylen = int(inflen & 0x0fffffff)
       if bodylen > MPROTO_BODY_LEN{
         return nil,nil
@@ -157,11 +261,11 @@ func moduleProtocolEntry() mPotoIter_t {
     }
   }
   //Body
-  bodyParser = func(data []byte) ([]mPotoFrame_t,mPotoIter_t){
+  bodyParser = func(data []byte) ([]mPotoFrame_t,MPotoIter_t){
     if len(data) < bodylen { return nil,bodyParser }
     bdata := data[0:bodylen]
     data = data[bodylen:]
-    stackFrm,flowPars := moduleProtocolEntry()(data)
+    stackFrm,flowPars := ModuleProtocolEntry()(data)
     pf.data = func () []byte{
       for i:=2; i<len(bdata); i+=2 {
         if string(bdata[i-2:i]) == MPROTO_CMD_SPLIT {
@@ -183,10 +287,6 @@ func moduleProtocolEntry() mPotoIter_t {
 //}}}
 
 //}}}
-
-// ------------------------ MODULE PRIVATE METHOD END ------------------------}}}
-
-// ------------------------ MODULE PUBLIC METHOD ------------------------{{{
 
 //Status check{{{
 
@@ -283,29 +383,39 @@ func BeginService(protocol string,addr string) uuid.UUID_t {
 
 //
 func QuickBindTrack(rule string,name string,servA uuid.UUID_t,servB uuid.UUID_t) uuid.UUID_t {
+  var c2m TrackFilter = func() TrackFilter {
+    return func(frm *iohub.Frame_t) (out []byte, dist []uuid.UUID_t) {
+      sendata := ModuleProtocolEnc(frm.ID,frm.Data,0,"")
+      return sendata,[]uuid.UUID_t{uuid.UUIDNull()}
+    }
+  }()
+  var m2c TrackFilter = func() TrackFilter {
+    //nextProcs := make(map[uuid.UUID_t]TrackFilter)
+    return func(frm *iohub.Frame_t) (out []byte, dist []uuid.UUID_t) {
+      return nil,nil
+    }
+  }()
   switch {
   case rule == "T":   //Transparent broadcast
     return BindTrack(name,nil,nil,servA,servB)
   case rule == "C":   //Client to modlue-format
+    return BindTrack(name,c2m,m2c,servA,servB)
+  case rule == "D":   //Module-format distrabute broadcast
     //
-  case rule == "M":   //Module-format broadcast
+  case rule[0:2] == "D*":  //Subscript module-format broadcast (buffered)
     //
-  case rule == "P":   //Point to point format
-    //
-  case rule[0:2] == "M*":  //Subscript module-format broadcast (buffered)
-    //
-  case rule[0:2] == "M#":  //Module-format hash distrabute (buffered)
+  case rule[0:2] == "D#":  //Module-format hash distrabute (buffered)
     //
   }
   return uuid.UUIDNull()
 }
 
 //
-func BindTrack(name string, filterA trackFilter, filterB trackFilter,
+func BindTrack(name string, filterA TrackFilter, filterB TrackFilter,
 servA uuid.UUID_t,servB uuid.UUID_t) uuid.UUID_t {
   //Make service reader with filter{{{
-  makeReader := func(distsvr iohub.Service_i) func(trackFilter) func(*iohub.Frame_t) {
-    return func (flt trackFilter) func(*iohub.Frame_t) {
+  makeReader := func(distsvr iohub.Service_i) func(TrackFilter) func(*iohub.Frame_t) {
+    return func (flt TrackFilter) func(*iohub.Frame_t) {
       if flt == nil { //No filter
         return func (frm *iohub.Frame_t) {
           //Todo: output message log
@@ -317,7 +427,10 @@ servA uuid.UUID_t,servB uuid.UUID_t) uuid.UUID_t {
       }else{
         return func (frm *iohub.Frame_t) {
           fdata,fdist := flt(frm)
-          if fdata != nil && len(fdata)>0 && fdist != nil && len(fdist)>0 {
+          if fdata != nil && len(fdata)>0 {
+            if fdist != nil || len(fdist)==0 {
+              fdist=[]uuid.UUID_t{uuid.UUIDNull()}
+            }
             for _,i := range fdist {
               distsvr.Write(iohub.Frame_t{ID:i, Data:fdata, Event:iohub.SEVT_BCAST})
             }
