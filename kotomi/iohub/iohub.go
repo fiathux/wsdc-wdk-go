@@ -13,6 +13,7 @@ import "fmt"
 const NETBUFFER_SIZE = 4096       //Max logic frame size
 const NETBUFFER_CHANQUEUE = 50000 //Max service data-frame queue
 const NETBUFFER_SESQUEUE = 20     //Max session data-frame queue
+const DEFAULT_SESSION_LIFE = 30   //Default session life(second) while it not active
 var creator map[NetType]func(hostaddress string)Service_i
 var module_instance uuid.UUID_t;
 
@@ -32,6 +33,7 @@ type session_t struct {
   wBuffer chan Frame_t
   term chan bool
   sk net.Conn
+  lifeInterval time.Duration
   life time.Time
   nettype NetType
 }
@@ -55,8 +57,10 @@ type service_t struct {
   wBuffer,rBuffer chan Frame_t
   nettype NetType
   term chan bool
+  defaultLifeInterval time.Duration
   children map[uuid.UUID_t]Session_i
   reader map[uuid.UUID_t]func(*Frame_t)
+  started bool
 }
 
 //Stream service class
@@ -110,12 +114,14 @@ type Session_i interface {
 }
 
 type Service_i interface {
+  Start()
   GetID() uuid.UUID_t
   GetAddr() string
   RegReader(ReaderID uuid.UUID_t,ReaderProc func(*Frame_t))
   UnregReader(ReaderID uuid.UUID_t)
   Write(DataFrame Frame_t) bool
   KillSession(SessionID uuid.UUID_t)
+  SetDefaultLife(interval time.Duration)
   UpdateSessionLife(SessionID uuid.UUID_t,life time.Time) bool
   HasSession(SessionID uuid.UUID_t) bool
   GetSession(SessionID uuid.UUID_t) (Session_i,bool)
@@ -163,12 +169,14 @@ func fillBasicServiceStructure(s *service_t,addr string,proto NetType) {
   s.rBuffer = make(chan Frame_t,NETBUFFER_CHANQUEUE)
   s.nettype = proto
   s.term = make(chan bool)
+  s.defaultLifeInterval = DEFAULT_SESSION_LIFE * time.Second
   s.children = make(map[uuid.UUID_t]Session_i)
   s.reader = make(map[uuid.UUID_t]func(*Frame_t))
+  s.started = false
 }
 
-func fillBasicSessionStructure(s Session_i,recv_id *uuid.UUID_t,sk net.Conn,
-from uuid.UUID_t,nettype NetType){
+func fillBasicSessionStructure(s Session_i,recv_id *uuid.UUID_t,
+sk net.Conn,from uuid.UUID_t,defaultLife time.Duration,nettype NetType){
   ses := s.getBody()
   if recv_id != nil {
     ses.id = *recv_id
@@ -178,6 +186,10 @@ from uuid.UUID_t,nettype NetType){
   ses.from = from
   ses.wBuffer = make(chan Frame_t,NETBUFFER_SESQUEUE)
   ses.term = make(chan bool)
+  ses.lifeInterval = defaultLife
+  if ses.lifeInterval != 0 {
+    ses.life = time.Now().Add(ses.lifeInterval)
+  }
   ses.sk = sk
   ses.nettype = nettype
 }
@@ -239,12 +251,12 @@ func startStreamAcceptor(service *serviceStream_t,nettype NetType){
       return
     }
     ses := sessionStream_t{}
-    fillBasicSessionStructure(&ses,nil,conn,service.id,nettype)
+    fillBasicSessionStructure(&ses,nil,conn,service.id,service.defaultLifeInterval,nettype)
     ses.rBuffer = make(chan Frame_t,NETBUFFER_SESQUEUE)
     service.setSession(&ses)
     // R/W Thread{{{
     go func(s *sessionStream_t){//Connecting event
-      service.rBuffer <- Frame_t{ID:s.id,Data:make([]byte,0),Err:nil,Event:SEVT_CONNECT}
+      service.rBuffer <- Frame_t{ID:s.id,Data:nil,Err:nil,Event:SEVT_CONNECT}
     }(&ses)
     go func(s *sessionStream_t){//Reader
       //fmt.Println("Start session READER")
@@ -254,10 +266,12 @@ func startStreamAcceptor(service *serviceStream_t,nettype NetType){
         recvlen,err := s.sk.Read(buf[:])
         //fmt.Println("Read data length",recvlen)
         if err!=nil || recvlen==0 {
-          //service.rBuffer <- Frame_t{ID:s.id,Data:buf[0:recvlen],Err:err,Event:SEVT_DOWN}
           s.terminate()
           return
         }else{
+          if s.lifeInterval != 0 {
+            s.life = time.Now().Add(s.lifeInterval)
+          }
           service.rBuffer <- Frame_t{ID:s.id,Data:buf[0:recvlen],Err:err,Event:SEVT_DATA}
         }
       }
@@ -273,7 +287,7 @@ func startStreamAcceptor(service *serviceStream_t,nettype NetType){
           case frm := <-s.wBuffer:
             service.rBuffer <- Frame_t{ID:s.id,Data:frm.Data,Err:err,Event:SEVT_SENTFAL}
           default:
-            service.rBuffer <- Frame_t{ID:s.id,Data:make([]byte,0),Err:err,Event:SEVT_DOWN}
+            service.rBuffer <- Frame_t{ID:s.id,Data:nil,Err:err,Event:SEVT_DOWN}
             s.sk.Close()
             return
           }
@@ -284,7 +298,7 @@ func startStreamAcceptor(service *serviceStream_t,nettype NetType){
         case <-s.term:
             return
         case frm := <-s.wBuffer:
-          if len(frm.Data) > 0 {
+          if frm.Data != nil && len(frm.Data) > 0 {
             _,err := s.sk.Write(frm.Data)
             if err != nil {
               //Todo: report write error(if exist)
@@ -292,10 +306,24 @@ func startStreamAcceptor(service *serviceStream_t,nettype NetType){
               service.rBuffer <- Frame_t{ID:s.id,Data:frm.Data,Err:err,Event:SEVT_SENTFAL}
               return
             }
+            if s.lifeInterval != 0 {
+              s.life = time.Now().Add(s.lifeInterval)
+            }
           }
           if frm.Event == SEVT_TERM || s.ifOutDate() {
             return
           }
+        }
+      }
+    }(&ses)
+    go func (s *sessionStream_t){//Timer
+      for {
+        select {
+        case <-s.term:
+          return
+        default:
+          s.wBuffer <- Frame_t{ID:s.id,Data:nil,Event:SEVT_TEST}
+          time.Sleep(10*time.Second)
         }
       }
     }(&ses)
@@ -329,9 +357,11 @@ func startDgramRWProc(service *servicePacket_t,nettype NetType) {
     }
     recvID := getRemoteID(addr)
     frm := Frame_t{ID:recvID,Data:buf[0:buflen]}
-    if !recvID.IsNull() && !service.HasSession(recvID) {
+    rcvses,ok := service.GetSession(recvID)
+    if !recvID.IsNull() && !ok {
       ses := sessionDgram_t{}
-      fillBasicSessionStructure(&ses,&recvID,service.sk,service.id,nettype)
+      fillBasicSessionStructure(&ses,&recvID,service.sk,service.id,
+        service.defaultLifeInterval,nettype)
       ses.id = recvID
       ses.remoteAddr=addr
       service.setSession(&ses)
@@ -348,23 +378,26 @@ func startDgramRWProc(service *servicePacket_t,nettype NetType) {
             case frm := <-s.wBuffer:
               service.rBuffer <- Frame_t{ID:s.id,Data:frm.Data,Err:err,Event:SEVT_SENTFAL}
             default:
-              service.rBuffer <- Frame_t{ ID:recvID,Data:make([]byte,0),Event:SEVT_DOWN }
+              service.rBuffer <- Frame_t{ ID:recvID,Data:nil,Event:SEVT_DOWN }
               return
             }
           }
         }()
         for{
           select {
-          case <-ses.term:
+          case <-s.term:
               return
           case frm := <-s.wBuffer:
-            if len(frm.Data) > 0 {
+            if frm.Data != nil && len(frm.Data) > 0 {
               _,err := service.sk.WriteTo(frm.Data,s.remoteAddr)
               if err != nil {
                 //Todo: report write error(if exist)
                 //fmt.Println("Exit session [write error]",s.id)
                 service.rBuffer <- Frame_t{ID:s.id,Data:frm.Data,Err:err,Event:SEVT_SENTFAL}
                 return
+              }
+              if s.lifeInterval != 0 {
+                s.life = time.Now().Add(s.lifeInterval)
               }
             }
             if frm.Event == SEVT_TERM || s.ifOutDate() {
@@ -374,6 +407,21 @@ func startDgramRWProc(service *servicePacket_t,nettype NetType) {
         }
       }(&ses)
       //}}}
+      //Timer{{{
+      go func (s *sessionDgram_t){
+        for {
+          select {
+          case <-s.term:
+            return
+          default:
+            s.wBuffer <- Frame_t{ID:s.id,Data:nil,Event:SEVT_TEST}
+            time.Sleep(20*time.Second)
+          }
+        }
+      }(&ses)
+      //}}}
+    }else if s := rcvses.getBody();s.lifeInterval != 0 {
+      s.life = time.Now().Add(s.lifeInterval)
     }
     service.rBuffer <- frm
   }
@@ -394,7 +442,6 @@ func init(){
       if err != nil {
         return nil
       }
-      go startStreamAcceptor(&s,NT_TCP)
       return &s
     },
     //}}}
@@ -410,7 +457,6 @@ func init(){
       if err != nil {
         return nil
       }
-      go startDgramRWProc(&s,NT_UDP)
       return &s
     },
     //}}}
@@ -423,7 +469,6 @@ func init(){
       if err != nil {
         return nil
       }
-      go startStreamAcceptor(&s,NT_UNIX)
       return &s
     },
     //}}}
@@ -439,7 +484,6 @@ func init(){
       if err != nil {
         return nil
       }
-      go startDgramRWProc(&s,NT_UNIXPACK)
       return &s
     },
     //}}}
@@ -489,6 +533,10 @@ func (s *service_t) Write(DataFrame Frame_t) bool {
     }
     return ok
   }
+}
+
+func (s *service_t) SetDefaultLife(interval time.Duration) {
+  s.defaultLifeInterval = interval
 }
 
 func (s *service_t) UpdateSessionLife(SessionID uuid.UUID_t,life time.Time) bool {
@@ -589,6 +637,15 @@ func (s *service_t) Terminate() {
 //}}}
 
 //Overrided service method {{{
+
+func (s *serviceStream_t) Start(){
+  s.sessionLock.Lock()
+  defer s.sessionLock.Unlock()
+  if s.started { return }
+  s.started = true
+  go startStreamAcceptor(s,s.nettype)
+}
+
 func (s *serviceStream_t) Terminate() {
   s.sk.Close()
   if s.nettype == NT_UNIX {
@@ -599,6 +656,14 @@ func (s *serviceStream_t) Terminate() {
 
 func (s *serviceStream_t) GetAddr() string {
   return s.sk.Addr().String()
+}
+
+func (s *servicePacket_t) Start(){
+  s.sessionLock.Lock()
+  defer s.sessionLock.Unlock()
+  if s.started { return }
+  s.started = true
+  go startDgramRWProc(s,s.nettype)
 }
 
 func (s *servicePacket_t) Terminate() {

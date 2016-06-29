@@ -5,6 +5,7 @@ import (
   "github.com/fiathux/wsdc-wdk-go/kotomi/iohub"
   "sync"
   "encoding/binary"
+  "time"
   _"regexp"
 )
 
@@ -357,7 +358,7 @@ func GetServiceInfo(svrid uuid.UUID_t) *ServiceInfo {
 //}}}
 
 //
-func BeginService(protocol string,addr string) uuid.UUID_t {
+func BeginService(protocol string,addr string,sesLife time.Duration) uuid.UUID_t {
   var nettype iohub.NetType
   switch protocol {
   case "tcp":
@@ -378,6 +379,10 @@ func BeginService(protocol string,addr string) uuid.UUID_t {
   uniqueDecorator(func(){
     tabService[svr.GetID()] = svr
   })
+  if sesLife != 0 {
+    svr.SetDefaultLife(sesLife)
+  }
+  svr.Start()
   return svr.GetID()
 }
 
