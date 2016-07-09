@@ -13,6 +13,7 @@ import "fmt"
 const NETBUFFER_SIZE = 4096       //Max logic frame size
 const NETBUFFER_CHANQUEUE = 50000 //Max service data-frame queue
 const NETBUFFER_SESQUEUE = 20     //Max session data-frame queue
+const NETBUFFER_DISTQUEUE = 100   //Max distibute data-frame queue
 const DEFAULT_SESSION_LIFE = 30   //Default session life(second) while it not active
 var creator map[NetType]func(hostaddress string)Service_i
 var module_instance uuid.UUID_t;
@@ -59,7 +60,7 @@ type service_t struct {
   term chan bool
   defaultLifeInterval time.Duration
   children map[uuid.UUID_t]Session_i
-  reader map[uuid.UUID_t]func(*Frame_t)
+  reader map[uuid.UUID_t] chan *Frame_t
   started bool
 }
 
@@ -117,15 +118,15 @@ type Service_i interface {
   Start()
   GetID() uuid.UUID_t
   GetAddr() string
-  RegReader(ReaderID uuid.UUID_t,ReaderProc func(*Frame_t))
+  RegReader(ReaderProc func(*Frame_t)) (ReaderID uuid.UUID_t)
   UnregReader(ReaderID uuid.UUID_t)
-  Write(DataFrame Frame_t) bool
+  Write(DataFrame *Frame_t) bool
   KillSession(SessionID uuid.UUID_t)
   SetDefaultLife(interval time.Duration)
   UpdateSessionLife(SessionID uuid.UUID_t,life time.Time) bool
   HasSession(SessionID uuid.UUID_t) bool
   GetSession(SessionID uuid.UUID_t) (Session_i,bool)
-  EnumSession()[]Session_i
+  EnumSession() []Session_i
   Terminate()
   //Private:
   setSession(SessionObj Session_i) bool
@@ -171,7 +172,7 @@ func fillBasicServiceStructure(s *service_t,addr string,proto NetType) {
   s.term = make(chan bool)
   s.defaultLifeInterval = DEFAULT_SESSION_LIFE * time.Second
   s.children = make(map[uuid.UUID_t]Session_i)
-  s.reader = make(map[uuid.UUID_t]func(*Frame_t))
+  s.reader = make(map[uuid.UUID_t]chan *Frame_t)
   s.started = false
 }
 
@@ -233,7 +234,7 @@ func ReadDistributor (service service_t){
         service.readerLock.RLock()
         defer service.readerLock.RUnlock()
         for _,v := range service.reader {
-          go v(&frm)
+          v<-&frm
         }
       }()
     }
@@ -506,10 +507,22 @@ func (s *service_t) GetID() uuid.UUID_t {
   return s.id
 }
 
-func (s *service_t) RegReader(ReaderID uuid.UUID_t,ReaderProc func(*Frame_t)) {
+func (s *service_t) RegReader(ReaderProc func(*Frame_t)) (ReaderID uuid.UUID_t) {
   s.readerLock.Lock()
   defer s.readerLock.Unlock()
-  s.reader[ReaderID] = ReaderProc
+  readerID := uuid.UUID1()
+  fmchan := make(chan *Frame_t,NETBUFFER_DISTQUEUE)
+  s.reader[readerID] = fmchan
+  go func (){
+    for{
+      frm,ok := <-fmchan
+      if !ok {
+        return
+      }
+      ReaderProc(frm)
+    }
+  }()
+  return readerID
 }
 
 func (s *service_t) UnregReader(ReaderID uuid.UUID_t) {
@@ -518,7 +531,7 @@ func (s *service_t) UnregReader(ReaderID uuid.UUID_t) {
   delete(s.reader,ReaderID)
 }
 
-func (s *service_t) Write(DataFrame Frame_t) bool {
+func (s *service_t) Write(DataFrame *Frame_t) bool {
   s.sessionLock.RLock()
   defer s.sessionLock.RUnlock()
   if (DataFrame.ID.IsNull() || DataFrame.ID == s.id) && DataFrame.Event == SEVT_BCAST {
@@ -529,7 +542,7 @@ func (s *service_t) Write(DataFrame Frame_t) bool {
   }else{
     _,ok := s.children[DataFrame.ID]
     if ok {
-      s.wBuffer <- DataFrame
+      s.wBuffer <- *DataFrame
     }
     return ok
   }

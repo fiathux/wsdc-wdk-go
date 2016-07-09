@@ -27,8 +27,8 @@ type track_t struct {
   bindB iohub.Service_i
   bindFuncA uuid.UUID_t
   bindFuncB uuid.UUID_t
-  rdFilterA TrackFilter
-  rdFilterB TrackFilter
+  rdBinderA TrackBinder
+  rdBinderB TrackBinder
   name string
 }
 
@@ -49,8 +49,9 @@ type CommandInfo struct {
   Cmd string
 }
 
-
-type TrackFilter func(frm *iohub.Frame_t) (out []byte, dist []uuid.UUID_t)
+type TrackFilter func(frm *iohub.Frame_t) (out,answ *iohub.Frame_t)
+type TrackDistributer func(outfrm *iohub.Frame_t) []*iohub.Frame_t
+type TrackBinder func(distsvr,srcsvr iohub.Service_i) func(frm *iohub.Frame_t)
 type TrackCmdProc func(from uuid.UUID_t,command string)
  
 // ------------------------ TYPE DEFINE END ------------------------}}}
@@ -388,23 +389,26 @@ func BeginService(protocol string,addr string,sesLife time.Duration) uuid.UUID_t
 
 //
 func QuickBindTrack(rule string,name string,servA uuid.UUID_t,servB uuid.UUID_t) uuid.UUID_t {
-  var c2m TrackFilter = func() TrackFilter {
-    return func(frm *iohub.Frame_t) (out []byte, dist []uuid.UUID_t) {
+  var transBinder = MakeTrackBinder(nil)(nil)
+  /*var c2m TrackFilter = func() TrackFilter {
+    return func(frm *iohub.Frame_t) (out,answ *iohub.Frame_t) {
       sendata := ModuleProtocolEnc(frm.ID,frm.Data,0,"")
-      return sendata,[]uuid.UUID_t{uuid.UUIDNull()}
+      return &(iohub.Frame_t{ID:frm.ID ,Data:sendata, Event:frm.Event, Err:frm.Err}),nil
     }
   }()
   var m2c TrackFilter = func() TrackFilter {
-    //nextProcs := make(map[uuid.UUID_t]TrackFilter)
-    return func(frm *iohub.Frame_t) (out []byte, dist []uuid.UUID_t) {
+    nextProcs := make(map[uuid.UUID_t]TrackFilter)
+    return func(frm *iohub.Frame_t) (out,answ *iohub.Frame_t) {
+      if frm.Event == iohub.SEVT_DATA {
+      }
       return nil,nil
     }
-  }()
+  }()*/
   switch {
   case rule == "T":   //Transparent broadcast
-    return BindTrack(name,nil,nil,servA,servB)
+    return BindTrack(name,transBinder,transBinder,servA,servB)
   case rule == "C":   //Client to modlue-format
-    return BindTrack(name,c2m,m2c,servA,servB)
+    //return BindTrack(name,c2m,m2c,servA,servB)
   case rule == "D":   //Module-format distrabute broadcast
     //
   case rule[0:2] == "D*":  //Subscript module-format broadcast (buffered)
@@ -416,35 +420,49 @@ func QuickBindTrack(rule string,name string,servA uuid.UUID_t,servB uuid.UUID_t)
 }
 
 //
-func BindTrack(name string, filterA TrackFilter, filterB TrackFilter,
-servA uuid.UUID_t,servB uuid.UUID_t) uuid.UUID_t {
-  //Make service reader with filter{{{
-  makeReader := func(distsvr iohub.Service_i) func(TrackFilter) func(*iohub.Frame_t) {
-    return func (flt TrackFilter) func(*iohub.Frame_t) {
-      if flt == nil { //No filter
+func MakeTrackBinder(flt TrackFilter) func (dstr TrackDistributer) TrackBinder {
+  return func (dstr TrackDistributer) TrackBinder{
+    return func(distsvr,srcsvr iohub.Service_i) func(frm *iohub.Frame_t) {
+      sendAllDist := func(outfrms []*iohub.Frame_t){
+        if outfrms != nil {
+          for _,perfrm := range outfrms { distsvr.Write(perfrm) }
+        }
+      }
+      switch{
+      case flt != nil && dstr != nil:
+        return func(frm *iohub.Frame_t){
+          out,answ := flt(frm)
+          if answ != nil { srcsvr.Write(answ) }
+          sendAllDist(dstr(out))
+        }
+      case flt != nil:
+        return func(frm *iohub.Frame_t){
+          sendAllDist(dstr(frm))
+        }
+      case dstr != nil:
+        return func(frm *iohub.Frame_t){
+          out,answ := flt(frm)
+          if answ != nil { srcsvr.Write(answ) }
+          if out != nil {
+            distsvr.Write(&(iohub.Frame_t{ID:uuid.UUIDNull(),Data:out.Data,Err:out.Err,
+              Event:iohub.SEVT_BCAST}))
+          }
+        }
+      default:  //
         return func (frm *iohub.Frame_t) {
           //Todo: output message log
-          if len(frm.Data)>0 {
-            distsvr.Write(iohub.Frame_t{ID:uuid.UUIDNull(),Data:frm.Data,Err:frm.Err,
-            Event:iohub.SEVT_BCAST})
+          if frm != nil && len(frm.Data)>0 {
+            distsvr.Write(&(iohub.Frame_t{ID:uuid.UUIDNull(),Data:frm.Data,Err:frm.Err,
+              Event:iohub.SEVT_BCAST}))
           }
-        }
-      }else{
-        return func (frm *iohub.Frame_t) {
-          fdata,fdist := flt(frm)
-          if fdata != nil && len(fdata)>0 {
-            if fdist != nil || len(fdist)==0 {
-              fdist=[]uuid.UUID_t{uuid.UUIDNull()}
-            }
-            for _,i := range fdist {
-              distsvr.Write(iohub.Frame_t{ID:i, Data:fdata, Event:iohub.SEVT_BCAST})
-            }
-          }
-        }
+        } 
       }
     }
   }
-  //}}}
+}
+
+//
+func BindTrack(name string, procA,procB TrackBinder, servA,servB uuid.UUID_t) uuid.UUID_t {
   idchan := make(chan uuid.UUID_t)
   go uniqueDecorator(func(){
     svrAObj,ok := tabService[servA]
@@ -458,9 +476,9 @@ servA uuid.UUID_t,servB uuid.UUID_t) uuid.UUID_t {
       return
     }
     trk := track_t{ id:uuid.UUID1(), bindA:svrAObj, bindB:svrBObj, name:name,
-    rdFilterA:filterA, rdFilterB:filterB, bindFuncA:uuid.UUID1(), bindFuncB:uuid.UUID1() }
-    svrAObj.RegReader(trk.bindFuncA,makeReader(svrBObj)(trk.rdFilterA))
-    svrBObj.RegReader(trk.bindFuncB,makeReader(svrAObj)(trk.rdFilterB))
+    rdBinderA:procA, rdBinderB:procB}
+    trk.bindFuncA = svrAObj.RegReader(procA(svrBObj,svrAObj))
+    trk.bindFuncB = svrBObj.RegReader(procB(svrAObj,svrBObj))
     tabTrack[trk.id] = trk
     serviceRefAdd(servA)
     serviceRefAdd(servB)
@@ -473,13 +491,12 @@ servA uuid.UUID_t,servB uuid.UUID_t) uuid.UUID_t {
 func BindCallback(proc func(frm *iohub.Frame_t),serv uuid.UUID_t) uuid.UUID_t {
   idchan := make(chan uuid.UUID_t)
   go uniqueDecorator(func(){
-    callid := uuid.UUID1()
     svrObj,ok := tabService[serv]
     if !ok {
       idchan <- uuid.UUIDNull()
       return
     }
-    svrObj.RegReader(callid,proc)
+    callid := svrObj.RegReader(proc)
     tabCallback[callid] = svrObj
     serviceRefAdd(serv)
   })
@@ -538,7 +555,7 @@ func WriteTo(service uuid.UUID_t,session uuid.UUID_t,data []byte) bool {
     }
     var evt iohub.SessionEvent
     if session.IsNull() { evt=iohub.SEVT_BCAST }else{ evt=iohub.SEVT_DATA }
-    oprst <- svr.Write(iohub.Frame_t{ID:session, Data:data, Event:evt})
+    oprst <- svr.Write(&(iohub.Frame_t{ID:session, Data:data, Event:evt}))
   })
   return <- oprst
 }
