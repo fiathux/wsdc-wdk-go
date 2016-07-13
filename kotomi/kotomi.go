@@ -49,8 +49,8 @@ type CommandInfo struct {
   Cmd string
 }
 
-type TrackFilter func(frm *iohub.Frame_t) (out,answ *iohub.Frame_t)
-type TrackDistributer func(outfrm *iohub.Frame_t) []*iohub.Frame_t
+type TrackFilter func(frm *iohub.Frame_t) (out []*iohub.Frame_t,answ *iohub.Frame_t)
+type TrackDistributer func(outfrm []*iohub.Frame_t) []*iohub.Frame_t
 type TrackBinder func(distsvr,srcsvr iohub.Service_i) func(frm *iohub.Frame_t)
 type TrackCmdProc func(from uuid.UUID_t,command string)
  
@@ -119,13 +119,6 @@ func serviceRefDec(serv uuid.UUID_t) {
   }
 }
 
-type mPotoFrame_t struct {
-  id uuid.UUID_t
-  data []byte
-  command string
-  tag MPotoTag_t
-}
-
 // ------------------------ MODULE PRIVATE METHOD END ------------------------}}}
 
 // ------------------------ MODULE PUBLIC METHOD ------------------------{{{
@@ -170,13 +163,20 @@ func execCmdThr(){
 //}}}
 
 //Modules protocol process {{{
+type mPotoFrame_t struct {
+  id uuid.UUID_t
+  data []byte
+  command string
+  tag MPotoTag_t
+}
+
 type MPotoIter_t func(data []byte)(frmstack []mPotoFrame_t,nextparse MPotoIter_t)
 type MPotoTag_t uint
 const (
-  MPROTO_DATA MPotoTag_t = iota
-  MPROTO_CONNECT
-  MPROTO_DISCONNECT
-  MPROTO_LAST         //Write last frame
+  MPROTO_DATA MPotoTag_t = iota //General data R/W
+  MPROTO_CONNECT      //Client: Connect
+  MPROTO_DISCONNECT   //Client: Disconnect
+  MPROTO_LAST         //Module: Write last frame and require close this client
 )
 
 const MPROTO_STACK_CAP = 4
@@ -222,14 +222,17 @@ func ModuleProtocolEnc(id uuid.UUID_t,data []byte,tag MPotoTag_t,command string)
       bodyTagLen := uint32(len(data) + len(cmdByte)) | curTag
       binary.BigEndian.PutUint32(curFram[MPH_P_SUBS:MPH_E_SUBS],bodyTagLen)
       curFram = append(curFram,cmdByte...)
-      curFram = append(curFram,data...)
+      if len(data)>0{ curFram = append(curFram,data...) }
       return append(result,curFram...)
     }else{
       cutlen := PROTOCOL_MODULE_FRAMELEN - MPH_LEN - len(cmdByte)
+      if cutlen<0 { //Too long command
+        return nil
+      }
       bodyTagLen := uint32(PROTOCOL_MODULE_FRAMELEN - MPH_LEN) | curTag
       binary.BigEndian.PutUint32(curFram[MPH_P_SUBS:MPH_E_SUBS],bodyTagLen)
       curFram = append(curFram,cmdByte...)
-      curFram = append(curFram,data[0:cutlen]...)
+      if len(data)>0{ curFram = append(curFram,data[0:cutlen]...) }
       result = append(result,curFram...)
       data = data[cutlen:]
     }
@@ -237,6 +240,7 @@ func ModuleProtocolEnc(id uuid.UUID_t,data []byte,tag MPotoTag_t,command string)
 }
 
 //Create module protocol parser{{{
+//IMPORTANT: parse result is frames STACK strature, the head item is last one
 func ModuleProtocolEntry() MPotoIter_t {
   frmbuff := make([]byte,0,PROTOCOL_MODULE_FRAMELEN)
   bodylen := 0
@@ -246,7 +250,7 @@ func ModuleProtocolEntry() MPotoIter_t {
   //Head
   headParser = func(data []byte) ([]mPotoFrame_t,MPotoIter_t) {
     frmbuff = append(frmbuff,data...)
-    if len(frmbuff) < MPH_LEN {
+    if len(frmbuff) < MPH_LEN { 
       return nil,headParser
     }else{
       if string(frmbuff[0:4]) != MPROTO_MAGIC {
@@ -390,25 +394,48 @@ func BeginService(protocol string,addr string,sesLife time.Duration) uuid.UUID_t
 //
 func QuickBindTrack(rule string,name string,servA uuid.UUID_t,servB uuid.UUID_t) uuid.UUID_t {
   var transBinder = MakeTrackBinder(nil)(nil)
-  /*var c2m TrackFilter = func() TrackFilter {
-    return func(frm *iohub.Frame_t) (out,answ *iohub.Frame_t) {
+  var c2m func (dstr TrackDistributer) TrackBinder = 
+  MakeTrackBinder( func(frm *iohub.Frame_t) (out []*iohub.Frame_t, answ *iohub.Frame_t) {
       sendata := ModuleProtocolEnc(frm.ID,frm.Data,0,"")
-      return &(iohub.Frame_t{ID:frm.ID ,Data:sendata, Event:frm.Event, Err:frm.Err}),nil
-    }
-  }()
-  var m2c TrackFilter = func() TrackFilter {
-    nextProcs := make(map[uuid.UUID_t]TrackFilter)
-    return func(frm *iohub.Frame_t) (out,answ *iohub.Frame_t) {
-      if frm.Event == iohub.SEVT_DATA {
+      return []*iohub.Frame_t{&(iohub.Frame_t{
+        ID:uuid.UUIDNull(), Data:sendata, Event:iohub.SEVT_BCAST, Err:frm.Err})},nil
+  } )
+  var m2c func (dstr TrackDistributer) TrackBinder = 
+  MakeTrackBinder(func() func(frm *iohub.Frame_t) (out []*iohub.Frame_t, answ *iohub.Frame_t) {
+    nextProcs := make(map[uuid.UUID_t]MPotoIter_t)
+    return func(frm *iohub.Frame_t) (out []*iohub.Frame_t, answ *iohub.Frame_t) {
+      if frm.Data != nil && len(frm.Data) > 0 {
+        _,ok := nextProcs[frm.ID]
+        if !ok {
+          fstack,nextiter := ModuleProtocolEntry()(frm.Data)
+          if nextiter == nil {
+            return nil,&(iohub.Frame_t{ID:frm.ID,Data:nil,Event:iohub.SEVT_TERM})
+          }
+          if fstack != nil {
+            var answ *iohub.Frame_t = nil
+            allfrm := make([]*iohub.Frame_t,0,len(fstack))
+            for i:=len(fstack); i > 0; i-- {
+              if fstack[i].tag == MPROTO_LAST {
+                allfrm = append(allfrm,&(iohub.Frame_t{
+                  ID:fstack[i].id,Data:fstack[i].data,Event:iohub.SEVT_TERM}))
+              }else if len(fstack[i].data)>0 {
+                allfrm = append(allfrm,&(iohub.Frame_t{ID:fstack[i].id,Data:fstack[i].data}))
+              }else if fstack[i].tag == MPROTO_DATA && len(fstack[i].data) == 0 {
+                answ = &(iohub.Frame_t{ID:frm.ID,Data:ModuleProtocolEnc(fstack[i].id,nil,0,"")})
+              }
+            }
+            return allfrm,answ
+          }
+        }
       }
       return nil,nil
     }
-  }()*/
+  }())
   switch {
   case rule == "T":   //Transparent broadcast
     return BindTrack(name,transBinder,transBinder,servA,servB)
   case rule == "C":   //Client to modlue-format
-    //return BindTrack(name,c2m,m2c,servA,servB)
+    return BindTrack(name,c2m(nil),m2c(nil),servA,servB)
   case rule == "D":   //Module-format distrabute broadcast
     //
   case rule[0:2] == "D*":  //Subscript module-format broadcast (buffered)
@@ -437,15 +464,14 @@ func MakeTrackBinder(flt TrackFilter) func (dstr TrackDistributer) TrackBinder {
         }
       case flt != nil:
         return func(frm *iohub.Frame_t){
-          sendAllDist(dstr(frm))
+          sendAllDist(dstr([]*iohub.Frame_t{frm}))
         }
       case dstr != nil:
         return func(frm *iohub.Frame_t){
           out,answ := flt(frm)
           if answ != nil { srcsvr.Write(answ) }
           if out != nil {
-            distsvr.Write(&(iohub.Frame_t{ID:uuid.UUIDNull(),Data:out.Data,Err:out.Err,
-              Event:iohub.SEVT_BCAST}))
+            sendAllDist(out)
           }
         }
       default:  //
