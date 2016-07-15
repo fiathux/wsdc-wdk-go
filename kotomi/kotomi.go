@@ -298,7 +298,7 @@ func ModuleProtocolEntry() MPotoIter_t {
 
 //
 func EnumTracks() []TrackInfo {
-  trkchan := make(chan []TrackInfo)
+  trkchan := make(chan []TrackInfo)// {{{
   go readDecorator(func(){
     if len(tabTrack) == 0 {
       trkchan <- nil
@@ -310,12 +310,12 @@ func EnumTracks() []TrackInfo {
     }
     trkchan <- trk
   })
-  return <-trkchan
+  return <-trkchan// }}}
 }
 
 //
 func GetTrackInfo(trackid uuid.UUID_t) *TrackInfo {
-  trkchan := make(chan *TrackInfo)
+  trkchan := make(chan *TrackInfo)// {{{
   go readDecorator(func(){
     trk,ok := tabTrack[trackid]
     if ok {
@@ -325,12 +325,12 @@ func GetTrackInfo(trackid uuid.UUID_t) *TrackInfo {
       trkchan <- nil
     }
   })
-  return <-trkchan
+  return <-trkchan// }}}
 }
 
 //
 func EnumServices() []ServiceInfo {
-  svrchan := make(chan []ServiceInfo)
+  svrchan := make(chan []ServiceInfo)// {{{
   go readDecorator(func(){
     if len(tabService) == 0 {
       svrchan <- nil
@@ -342,12 +342,12 @@ func EnumServices() []ServiceInfo {
     }
     svrchan <- svr
   })
-  return <-svrchan
+  return <-svrchan// }}}
 }
 
 //
 func GetServiceInfo(svrid uuid.UUID_t) *ServiceInfo {
-  svrchan := make(chan *ServiceInfo)
+  svrchan := make(chan *ServiceInfo)// {{{
   go readDecorator(func(){
     svr,ok := tabService[svrid]
     if ok {
@@ -357,14 +357,14 @@ func GetServiceInfo(svrid uuid.UUID_t) *ServiceInfo {
       svrchan <- nil
     }
   })
-  return <-svrchan
+  return <-svrchan// }}}
 }
 
 //}}}
 
 //
-func BeginService(protocol string,addr string,sesLife time.Duration) uuid.UUID_t {
-  var nettype iohub.NetType
+func BeginService(protocol string,addr string,sesLife *time.Duration) uuid.UUID_t {
+  var nettype iohub.NetType// {{{
   switch protocol {
   case "tcp":
     nettype = iohub.NT_TCP
@@ -384,16 +384,16 @@ func BeginService(protocol string,addr string,sesLife time.Duration) uuid.UUID_t
   uniqueDecorator(func(){
     tabService[svr.GetID()] = svr
   })
-  if sesLife != 0 {
-    svr.SetDefaultLife(sesLife)
+  if sesLife != nil {
+    svr.SetDefaultLife(*sesLife)
   }
   svr.Start()
-  return svr.GetID()
+  return svr.GetID()// }}}
 }
 
 //
 func QuickBindTrack(rule string,name string,servA uuid.UUID_t,servB uuid.UUID_t) uuid.UUID_t {
-  var transBinder = MakeTrackBinder(nil)(nil)
+  var transBinder = MakeTrackBinder(nil)(nil)// {{{
   var c2m func (dstr TrackDistributer) TrackBinder = 
   MakeTrackBinder( func(frm *iohub.Frame_t) (out []*iohub.Frame_t, answ *iohub.Frame_t) {
       sendata := ModuleProtocolEnc(frm.ID,frm.Data,0,"")
@@ -415,13 +415,17 @@ func QuickBindTrack(rule string,name string,servA uuid.UUID_t,servB uuid.UUID_t)
             var answ *iohub.Frame_t = nil
             allfrm := make([]*iohub.Frame_t,0,len(fstack))
             for i:=len(fstack); i > 0; i-- {
-              if fstack[i].tag == MPROTO_LAST {
+              perfrm := fstack[i-1]
+              if perfrm.command != "" {
+                SendCmd(CommandInfo{Id:perfrm.id,Cmd:perfrm.command})
+              }
+              if perfrm.tag == MPROTO_LAST {
                 allfrm = append(allfrm,&(iohub.Frame_t{
-                  ID:fstack[i].id,Data:fstack[i].data,Event:iohub.SEVT_TERM}))
-              }else if len(fstack[i].data)>0 {
-                allfrm = append(allfrm,&(iohub.Frame_t{ID:fstack[i].id,Data:fstack[i].data}))
-              }else if fstack[i].tag == MPROTO_DATA && len(fstack[i].data) == 0 {
-                answ = &(iohub.Frame_t{ID:frm.ID,Data:ModuleProtocolEnc(fstack[i].id,nil,0,"")})
+                  ID:perfrm.id,Data:perfrm.data,Event:iohub.SEVT_TERM}))
+              }else if len(perfrm.data)>0 {
+                allfrm = append(allfrm,&(iohub.Frame_t{ID:perfrm.id,Data:perfrm.data}))
+              }else if perfrm.tag == MPROTO_DATA && len(perfrm.data) == 0 {
+                answ = &(iohub.Frame_t{ID:frm.ID,Data:ModuleProtocolEnc(perfrm.id,nil,0,"")})
               }
             }
             return allfrm,answ
@@ -443,12 +447,12 @@ func QuickBindTrack(rule string,name string,servA uuid.UUID_t,servB uuid.UUID_t)
   case rule[0:2] == "D#":  //Module-format hash distrabute (buffered)
     //
   }
-  return uuid.UUIDNull()
+  return uuid.UUIDNull()// }}}
 }
 
 //
 func MakeTrackBinder(flt TrackFilter) func (dstr TrackDistributer) TrackBinder {
-  return func (dstr TrackDistributer) TrackBinder{
+  return func (dstr TrackDistributer) TrackBinder{// {{{
     return func(distsvr,srcsvr iohub.Service_i) func(frm *iohub.Frame_t) {
       sendAllDist := func(outfrms []*iohub.Frame_t){
         if outfrms != nil {
@@ -462,11 +466,11 @@ func MakeTrackBinder(flt TrackFilter) func (dstr TrackDistributer) TrackBinder {
           if answ != nil { srcsvr.Write(answ) }
           sendAllDist(dstr(out))
         }
-      case flt != nil:
+      case dstr != nil:
         return func(frm *iohub.Frame_t){
           sendAllDist(dstr([]*iohub.Frame_t{frm}))
         }
-      case dstr != nil:
+      case flt != nil:
         return func(frm *iohub.Frame_t){
           out,answ := flt(frm)
           if answ != nil { srcsvr.Write(answ) }
@@ -484,12 +488,12 @@ func MakeTrackBinder(flt TrackFilter) func (dstr TrackDistributer) TrackBinder {
         } 
       }
     }
-  }
+  }// }}}
 }
 
 //
 func BindTrack(name string, procA,procB TrackBinder, servA,servB uuid.UUID_t) uuid.UUID_t {
-  idchan := make(chan uuid.UUID_t)
+  idchan := make(chan uuid.UUID_t)// {{{
   go uniqueDecorator(func(){
     svrAObj,ok := tabService[servA]
     if !ok {
@@ -510,12 +514,12 @@ func BindTrack(name string, procA,procB TrackBinder, servA,servB uuid.UUID_t) uu
     serviceRefAdd(servB)
     idchan <- trk.id
   })
-  return <-idchan
+  return <-idchan// }}}
 }
 
 //
 func BindCallback(proc func(frm *iohub.Frame_t),serv uuid.UUID_t) uuid.UUID_t {
-  idchan := make(chan uuid.UUID_t)
+  idchan := make(chan uuid.UUID_t)// {{{
   go uniqueDecorator(func(){
     svrObj,ok := tabService[serv]
     if !ok {
@@ -526,12 +530,12 @@ func BindCallback(proc func(frm *iohub.Frame_t),serv uuid.UUID_t) uuid.UUID_t {
     tabCallback[callid] = svrObj
     serviceRefAdd(serv)
   })
-  return <-idchan
+  return <-idchan// }}}
 }
 
 //
 func RemoveTrack(id uuid.UUID_t) {
-  go uniqueDecorator(func(){
+  go uniqueDecorator(func(){// {{{
     trk,ok := tabTrack[id]
     if !ok {return}
     trk.bindA.UnregReader(trk.bindFuncA)
@@ -539,23 +543,23 @@ func RemoveTrack(id uuid.UUID_t) {
     trk.bindB.UnregReader(trk.bindFuncB)
     serviceRefDec(trk.bindB.GetID())
     delete(tabTrack,id)
-  })
+  })// }}}
 }
 
 //
 func RemoveCall(id uuid.UUID_t) {
-  go uniqueDecorator(func(){
+  go uniqueDecorator(func(){// {{{
     csvr,ok := tabCallback[id]
     if !ok {return}
     csvr.UnregReader(id)
     serviceRefDec(csvr.GetID())
     delete(tabCallback,id)
-  })
+  })// }}}
 }
 
 //
 func CloseService(id uuid.UUID_t) bool {
-  oprst := make(chan bool)
+  oprst := make(chan bool)// {{{
   go uniqueDecorator(func(){
     _,have := tabService[id]
     if have {
@@ -567,12 +571,12 @@ func CloseService(id uuid.UUID_t) bool {
     }
     oprst <- false
   })
-  return <- oprst
+  return <- oprst// }}}
 }
 
 //
 func WriteTo(service uuid.UUID_t,session uuid.UUID_t,data []byte) bool {
-  oprst := make(chan bool)
+  oprst := make(chan bool)// {{{
   go readDecorator(func(){
     svr,ok := tabService[service]
     if !ok {
@@ -583,7 +587,7 @@ func WriteTo(service uuid.UUID_t,session uuid.UUID_t,data []byte) bool {
     if session.IsNull() { evt=iohub.SEVT_BCAST }else{ evt=iohub.SEVT_DATA }
     oprst <- svr.Write(&(iohub.Frame_t{ID:session, Data:data, Event:evt}))
   })
-  return <- oprst
+  return <- oprst// }}}
 }
 
 // ------------------------ MODULE PUBLIC METHOD END ------------------------}}}
