@@ -140,7 +140,7 @@ type Service_i interface {
 
 //Basic data-type support{{{
 
-func getNetworkIDGenerator(proto NetType) func(uuid.UUID_t)func(string)uuid.UUID_t {
+func GetNetworkIDGenerator(proto NetType) func(uuid.UUID_t) func(string)uuid.UUID_t {
   var proto_head_s string
   switch proto {
     case NT_TCP:
@@ -163,7 +163,7 @@ func getNetworkIDGenerator(proto NetType) func(uuid.UUID_t)func(string)uuid.UUID
 }
 
 func fillBasicServiceStructure(s *service_t,addr string,proto NetType) {
-  s.id = getNetworkIDGenerator(proto)(module_instance)(addr)
+  s.id = GetNetworkIDGenerator(proto)(module_instance)(addr)
   s.readerLock = &(sync.RWMutex{})
   s.sessionLock = &(sync.RWMutex{})
   s.wBuffer = make(chan Frame_t,NETBUFFER_CHANQUEUE)
@@ -221,7 +221,7 @@ func writeDistributor (service service_t){
 }
 
 //Read distributor
-func ReadDistributor (service service_t){
+func readDistributor (service service_t){
   //fmt.Println("Start service R-DISTR")
   //defer fmt.Println("Stop service R-DISTR")
   for{
@@ -245,7 +245,7 @@ func ReadDistributor (service service_t){
 //Stream acceptor {{{
 func startStreamAcceptor(service *serviceStream_t,nettype NetType){
   go writeDistributor(service.service_t)
-  go ReadDistributor(service.service_t)
+  go readDistributor(service.service_t)
   for {
     conn,err := service.sk.Accept()
     if err != nil {
@@ -336,7 +336,7 @@ func startStreamAcceptor(service *serviceStream_t,nettype NetType){
 //Data-gram read/write process{{{
 func startDgramRWProc(service *servicePacket_t,nettype NetType) {
   //Dgram session ID
-  genRemoteID := getNetworkIDGenerator(nettype)(service.id)
+  genRemoteID := GetNetworkIDGenerator(nettype)(service.id)
   getRemoteID := func(addr net.Addr) uuid.UUID_t {
     if addr == nil {
       return uuid.UUIDNull()
@@ -349,7 +349,7 @@ func startDgramRWProc(service *servicePacket_t,nettype NetType) {
   }
   //
   go writeDistributor(service.service_t)
-  go ReadDistributor(service.service_t)
+  go readDistributor(service.service_t)
   for {
     buf := [NETBUFFER_SIZE]byte{}
     buflen,addr,err := service.sk.ReadFrom(buf[:])
