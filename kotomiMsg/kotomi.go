@@ -1,15 +1,13 @@
-package kotomi
+package kotomiMsg
 
 import (
   "github.com/fiathux/wsdc-wdk-go/rfc/uuid"
-  "github.com/fiathux/wsdc-wdk-go/kotomi/iohub"
+  "github.com/fiathux/wsdc-wdk-go/kotomiMsg/iohub"
   "sync"
   "encoding/binary"
   "time"
   _"regexp"
 )
-
-const PROTOCOL_MODULE_FRAMELEN = 65536
 
 // ------------------------ TYPE DEFINE ------------------------{{{
 
@@ -165,7 +163,7 @@ func execCmdThr(){
 //Modules protocol process {{{
 type mPotoFrame_t struct {
   cli_id uuid.UUID_t
-  frm_id uuid.UUID_t
+  frm_ts int64
   tag MPotoTag_t
   data []byte
 }
@@ -178,42 +176,42 @@ const (
   MPROTO_CONNECT      //Client: Connect
   MPROTO_DISCONNECT   //Client: Disconnect
   MPROTO_LAST         //Module: Write last frame and require close this client
+  MPROTO_TEST         //Module: Link test
 )
-
+const MPROTO_FRAMELEN_MAX = 65536 //Max module fram length
 const MPROTO_STACK_CAP = 4
 const ( //Module protocol head position
   MPH_L_MAGIC = 4
   MPH_L_CLIID = 16
-  MPH_L_FRMID = 16
+  MPH_L_FRMID = 8
   MPH_L_SUBS = 4
   MPH_LEN = MPH_L_MAGIC + MPH_L_CLIID + MPH_L_FRMID + MPH_L_SUBS
 )
-const MPROTO_BODY_LEN int = PROTOCOL_MODULE_FRAMELEN - MPH_LEN
+const MPROTO_BODY_LEN int = MPROTO_FRAMELEN_MAX - MPH_LEN
 const MPROTO_MAGIC string = "TSP:"
 
 //Encode date to module frame data
 func ModuleProtocolEnc(id uuid.UUID_t,data []byte,tag MPotoTag_t) []byte {
   var curTag uint32 = 0
-  firstFrame := true
   result := make([]byte,0,MPROTO_STACK_CAP)
   for {
-    frmId := uuid.UUID1()
-    curFram := make([]byte,MPH_LEN,PROTOCOL_MODULE_FRAMELEN)
+    frmTS := time.Now().UnixNano()
+    curFram := make([]byte,MPH_LEN,MPROTO_FRAMELEN_MAX)
     copy(curFram[0:MPH_L_MAGIC],[]byte(MPROTO_MAGIC))
     clipFrm := curFram[MPH_L_MAGIC:]
     copy(clipFrm[0:MPH_L_CLIID],id[:])
     clipFrm = clipFrm[MPH_L_CLIID:]
-    copy(clipFrm[0:MPH_L_CLIID],frmId[:])
+    binary.BigEndian.PutUint64(clipFrm[0:MPH_L_CLIID],uint64(frmTS))
     clipFrm = clipFrm[MPH_L_FRMID:]
     curTag = uint32(tag) << 28
-    if len(data) < (PROTOCOL_MODULE_FRAMELEN - MPH_LEN) {
+    if len(data) < (MPROTO_FRAMELEN_MAX - MPH_LEN) {
       bodyTagLen := uint32(len(data)) | curTag
       binary.BigEndian.PutUint32(clipFrm[0:MPH_L_SUBS],bodyTagLen)
       if len(data)>0{ curFram = append(curFram,data...) }
       return append(result,curFram...)
     }else{
-      cutlen := PROTOCOL_MODULE_FRAMELEN - MPH_LEN
-      bodyTagLen := uint32(PROTOCOL_MODULE_FRAMELEN - MPH_LEN) | curTag
+      cutlen := MPROTO_FRAMELEN_MAX - MPH_LEN
+      bodyTagLen := uint32(MPROTO_FRAMELEN_MAX - MPH_LEN) | curTag
       binary.BigEndian.PutUint32(clipFrm[0:MPH_L_SUBS],bodyTagLen)
       curFram = append(curFram,data[0:cutlen]...)
       result = append(result,curFram...)
@@ -225,7 +223,7 @@ func ModuleProtocolEnc(id uuid.UUID_t,data []byte,tag MPotoTag_t) []byte {
 //Create module protocol parser{{{
 //IMPORTANT: parse result is frames STACK strature, the head item is last one
 func ModuleProtocolEntry() MPotoIter_t {
-  frmbuff := make([]byte,0,PROTOCOL_MODULE_FRAMELEN)
+  frmbuff := make([]byte,0,MPROTO_FRAMELEN_MAX)
   bodylen := 0
   pf := mPotoFrame_t{}
   var headParser MPotoIter_t
@@ -237,34 +235,31 @@ func ModuleProtocolEntry() MPotoIter_t {
     if len(frmbuff) < MPH_LEN { 
       return nil,headParser
     }else{
-      if string(frmbuff[0:4]) != MPROTO_MAGIC {
+      if string(frmbuff[0:MPH_L_MAGIC]) != MPROTO_MAGIC {
         return nil,nil
       }
-      copy(pf.cli_id[:],frmbuff[4:20])
-      inflen := binary.BigEndian.Uint32(frmbuff[20:24])
+      clipbuff := frmbuff[MPH_L_MAGIC:]
+      copy(pf.cli_id[:],clipbuff[0:MPH_L_CLIID])
+      clipbuff = frmbuff[MPH_L_CLIID:]
+      pf.frm_ts = int64(binary.BigEndian.Uint64(clipbuff[0:MPH_L_FRMID]))
+      clipbuff = frmbuff[MPH_L_FRMID:]
+      inflen := binary.BigEndian.Uint32(clipbuff[0:MPH_L_SUBS])
       pf.tag = MPotoTag_t(inflen>>28)
       bodylen = int(inflen & 0x0fffffff)
       if bodylen > MPROTO_BODY_LEN{
         return nil,nil
       }
-      return bodyParser(frmbuff[24:])
+      return bodyParser(nil)
     }
   }
   //Body
   bodyParser = func(data []byte) ([]mPotoFrame_t,MPotoIter_t){
-    if len(data) < bodylen { return nil,bodyParser }
+    if len(data) > 0 { frmbuff = append(frmbuff,data...) }
+    if len(frmbuff[MPH_LEN:]) < bodylen { return nil,bodyParser }
     bdata := data[0:bodylen]
     data = data[bodylen:]
     stackFrm,flowPars := ModuleProtocolEntry()(data)
-    pf.data = func () []byte{
-      for i:=2; i<len(bdata); i+=2 {
-        if string(bdata[i-2:i]) == MPROTO_CMD_SPLIT {
-          pf.command = string(bdata[0:i-2])
-          return bdata[i:]
-        }
-      }
-      return make([]byte,0)
-    }()
+    pf.data = bdata
     if stackFrm != nil {
       return append(stackFrm,pf),flowPars
     }else{
@@ -380,7 +375,7 @@ func QuickBindTrack(rule string,name string,servA uuid.UUID_t,servB uuid.UUID_t)
   var transBinder = MakeTrackBinder(nil)(nil)// {{{
   var c2m func (dstr TrackDistributer) TrackBinder = 
   MakeTrackBinder( func(frm *iohub.Frame_t) (out []*iohub.Frame_t, answ *iohub.Frame_t) {
-      sendata := ModuleProtocolEnc(frm.ID,frm.Data,0,"")
+      sendata := ModuleProtocolEnc(frm.ID,frm.Data,0)
       return []*iohub.Frame_t{&(iohub.Frame_t{
         ID:uuid.UUIDNull(), Data:sendata, Event:iohub.SEVT_BCAST, Err:frm.Err})},nil
   } )
@@ -400,16 +395,15 @@ func QuickBindTrack(rule string,name string,servA uuid.UUID_t,servB uuid.UUID_t)
             allfrm := make([]*iohub.Frame_t,0,len(fstack))
             for i:=len(fstack); i > 0; i-- {
               perfrm := fstack[i-1]
-              if perfrm.command != "" {
-                SendCmd(CommandInfo{Id:perfrm.id,Cmd:perfrm.command})
-              }
-              if perfrm.tag == MPROTO_LAST {
+              switch {
+              case perfrm.tag == MPROTO_LAST:
                 allfrm = append(allfrm,&(iohub.Frame_t{
-                  ID:perfrm.id,Data:perfrm.data,Event:iohub.SEVT_TERM}))
-              }else if len(perfrm.data)>0 {
-                allfrm = append(allfrm,&(iohub.Frame_t{ID:perfrm.id,Data:perfrm.data}))
-              }else if perfrm.tag == MPROTO_TO && len(perfrm.data) == 0 {
-                answ = &(iohub.Frame_t{ID:frm.ID,Data:ModuleProtocolEnc(perfrm.id,nil,0,"")})
+                  ID:perfrm.cli_id,Data:perfrm.data,Event:iohub.SEVT_TERM,
+                }))
+              case perfrm.tag == MPROTO_TO && len(perfrm.data)>0:
+                allfrm = append(allfrm,&(iohub.Frame_t{ID:perfrm.cli_id,Data:perfrm.data}))
+              case perfrm.tag == MPROTO_TEST:
+                answ = &(iohub.Frame_t{ID:frm.ID,Data:ModuleProtocolEnc(perfrm.cli_id,nil,MPROTO_TEST)})
               }
             }
             return allfrm,answ
