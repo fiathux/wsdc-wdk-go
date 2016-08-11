@@ -1,0 +1,255 @@
+KotomiMsg使用说明
+---------------------------------------------------------------------------------------------------
+KotomiMsg是一个使用Golang实现的，以分布式双向流通信为最终目的数据分发中间件，它现在已经可以作为常规
+网络开发框架使用，未来它也可以作为独立的工作平台运行，实现与任意语言任意平台的业务对接。
+
+目前可用的组件仅限于IO接口层，该接口层主要实现以下功能：
+1. 随意启动一个网络侦听（术语Service），支持TCP、UDP、UNIX Stream和UNIX Package（UNIX套接字仅针对
+符合POSIX标准的操作系统）
+2. 通过订阅获取Service数据，一旦订阅成功，数据将以回调方式主动推送
+3. 通过UUID识别连接，和数据回发，支持无数据读写滑动超时
+4. 连接意外断开时可以退还缓存中未写入的数据（向订阅者公告）
+
+构建方法：
+
+1. 安装对应计算平台的Golang环境
+2. 使用命令下载并编译组件：go get github.com/fiathux/wsdc-wdk-go/kotomiMsg
+
+使用示例参考，以下程序实现接收TCP和UNIX Socket，实现数据流互通(test.go)：
+
+---------------------------------------------------------------------------------------------------
+|  //典型用法
+|  
+|  package main
+|  
+|  import (
+|    "time"
+|    "github.com/fiathux/wsdc-wdk-go/rfc/uuid"
+|    "github.com/fiathux/wsdc-wdk-go/kotomiMsg"
+|    "github.com/fiathux/wsdc-wdk-go/kotomiMsg/iohub"
+|  )
+|  
+|  func main(){
+|    var forever time.Duration = 0 * time.Second   //生命周期为0时，连接永不过期
+|    exitflag := make(chan bool)
+|    tcpid := kotomiMsg.BeginService("tcp","0.0.0.0:9000",nil) //启动TCP侦听
+|    uxid := kotomiMsg.BeginService("unix","/tmp/letsgo.sock",&forever) //启动UNIX侦听
+|    kotomiMsg.BindCallback(func(frm *iohub.Frame_t){ //订阅TCP数据
+|      if len(frm.Data) != 0 && string(frm.Data) == "exit\n" {
+|        close(exitflag) //收到“exit\n”时退出程序
+|      }
+|      kotomiMsg.WriteTo(uxid,uuid.UUIDNull(),frm.Data)
+|    },tcpid)
+|    kotomiMsg.BindCallback(func(frm *iohub.Frame_t){ //订阅UNIX数据
+|      kotomiMsg.WriteTo(tcpid,uuid.UUIDNull(),frm.Data)
+|    },uxid)
+|    <-exitflag  //主线程的等待
+|    kotomiMsg.CloseService(tcpid)
+|    kotomiMsg.CloseService(uxid)
+|  }
+---------------------------------------------------------------------------------------------------
+
+以下两种方式属于试用功能，设计尚未定型，也未经过有充分测试：
+---------------------------------------------------------------------------------------------------
+|  //与上面示例接近等效（不具备退出操作），实现TCP和UNIX两个流互通
+|  package main
+|  
+|  import (
+|    "time"
+|    "github.com/fiathux/wsdc-wdk-go/kotomiMsg"
+|  )
+|  
+|  func main(){
+|    exitflag := make(chan bool)
+|    var forever time.Duration = 0 * time.Second
+|    tcpid := kotomiMsg.BeginService("tcp","0.0.0.0:9000",nil)
+|    uxid := kotomiMsg.BeginService("unix","/tmp/letsgo.sock",&forever)
+|    kotomiMsg.QuickBindTrack("T","onetrack",tcpid,uxid) //Transparent直通
+|    <-exitflag
+|  }
+---------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------
+|  /* 高级绑定，将TCP数据封装为特殊的数据帧发送给UNIX口，该数据帧包含了连接来源和状态信息，而UNIX口
+|   * 则使用同等协议通信，网关自动解包并应用指定的状态发送数据到指定连接
+|   * 数据包封装结构为(数值表示全部使用网络字节序)：
+|   *  位     | 长度    | 用途          | 说明
+|   * 0-32    | 32      | MAGIC         | 数据帧MAGIC标识，固定为ASCII字符："TSP："
+|   * 32-160  | 128     | SESSIONID     | 以Binary表示的数据连接UUID
+|   * 160-164 | 4       | STATUS        | 状态码，取值0-31
+|   * 164-192 | 28      | LENGTH        | 数据帧正文部分的长度
+|   * ...     | *       | BODY          | 数据帧正文
+|   * 状态码当前有以下可能性：
+|   *  常量名             | 值    | 说明
+|   *  MPROTO_FROM        | 0     | 接收到的来自客户侧的数据
+|   *  MPROTO_TO          | 1     | 需要发送到客户的数据
+|   *  MPROTO_CONNECT     | 2     | 新客户连接
+|   *  MPROTO_DISCONNECT  | 3     | 客户断开连接
+|   *  MPROTO_LAST        | 4     | 发送给客户的最后一帧数据（发送完成后断开客户）
+|   *  MPROTO_TEST        | 5     | 链路测试保持帧，发送的BODY将被忽略，可以回发应答
+|   */
+|  package main
+|  
+|  import (
+|    "time"
+|    "github.com/fiathux/wsdc-wdk-go/kotomiMsg"
+|  )
+|  
+|  func main(){
+|    exitflag := make(chan bool)
+|    var forever time.Duration = 0 * time.Second
+|    tcpid := kotomiMsg.BeginService("tcp","0.0.0.0:9000",nil)
+|    uxid := kotomiMsg.BeginService("unix","/tmp/letsgo.sock",&forever)
+|    kotomiMsg.QuickBindTrack("C","onetrack",tcpid,uxid) //Client对接通道
+|    <-exitflag
+|  }
+---------------------------------------------------------------------------------------------------
+
+常用API：
+
+===================================================================================================
+包："github.com/fiathux/wsdc-wdk-go/rfc/uuid"
+KotomiMsg使用UUID来标识服务、进程实例和连接会话，KotomiMsg提供的uuid库支持RFC 4122标准定义的UUID1、
+UUID3、UUID4和UUID5生成，可以生成高质量的集群唯一标识。
+所有生成的UUID使用类型“uuid.UUID_t”表示，本质为一个[16]byte
+---------------------------------------------------------------------------------------------------
+
++ uuid.UUID1() uuid.UUID_t
+  生成UUID版本1标准的UUID，该UUID由网卡地址、时间戳和随机数组成
+
++ uuid.UUID1r() uuid.UUID_t
+  生成UUID版本1的离线替代方案，如果本机没有安装任何以太网标准设备或者无法获取网卡地址时，根据协议使
+  用随机数方案。一般来说函数“uuid.UUID1()uuid.UUID_t”会自动侦测并使用离线版本，该函数只有在开发者强
+  调必须使用离线版本（即便已经安装网卡）的情况下作为UUID1的替代方案执行。
+
++ uuid.UUID3(ns UUID_NS,name []byte) uuid.UUID_t
+  生成UUID版本3标准的UUID，该UUID采用命名空间HASH的方式生成，ns参数指定命名空间，name则是生成ID依据
+  的内容，可以是任意数据。当指定的ns和name相同时，函数总是返回相同的UUID。这类UUID主要用于对独立的
+  内容摘要生成唯一标识。
+  该函数ns参数支持以下几种命名空间：
+    NAMESPACE_DNS   : DNS域命名
+    NAMESPACE_URL   : 统一资源定位标识URL命名
+    NAMESPACE_OID   : 对象ID命名
+    NAMESPACE_X500  : X500协议命名
+
++ uuid.UUID4() uuid.UUID_t
+  生成UUID版本4标准的UUID，该UUID完全由高安全级别的随机数（或伪随机数）组成
+
++ uuid.UUID5(ns UUID_NS,name []byte) uuid.UUID_t
+  生成UUID版本5标准的UUID，该UUID使用方法和原理与UUID3一致，但是使用更加安全的HASH算法（SHA1）
+
++ uuid.UUIDNull() uuid.UUID_t
+  生成RFC 4122定义的空白UUID，该UUID所有数据位均为0。要验证一个UUID结构是否为Null可以使用UUID对象的
+  方法“func (uid UUID_t) IsNull() bool”进行检查，如果UUID为Null则返回true
+===================================================================================================
+
+===================================================================================================
+包："github.com/fiathux/wsdc-wdk-go/kotomiMsg/iohub"
+iohub包实现了kotomiMsg的并发网络链路聚合管理，是对Golang网络库的应用封装。通过该包可以直接访问网络
+会话对象和服务侦听对象。但是kotomiMsg并不鼓励直接访问该包的对象，而是采用更加易用的kotomiMsg API。
+但是对kotomiMsg的开发中也可能会接触到数据帧对象和网络会话接口，因此以下对两者进行介绍
+---------------------------------------------------------------------------------------------------
++ type Frame_t struct {
+    ID uuid.UUID_t
+    Data []byte
+    Err error
+    Event SessionEvent
+  }
+  存储来自网络的数据流逻辑帧结构，该结构不一定包含一个完整的业务帧，仅仅只是代表当前收到的数据片段。
+  ID    : 收到数据的会话ID
+  Data  : 收到的数据，该数据只读但是并不作任何保护，写入修改可能影响其他并发解析逻辑
+  Err   : 发生在网络底层的错误对象，没有错误时为nil
+  Event : 数据帧级别事件代码
+
+  数据帧事件代码可能是如下情况：
+    SEVT_DATA     : [收发]普通点对点数据帧
+    SEVT_BCAST    : [发送]广播数据帧，此时ID若为Null或Service对象ID，则向整个Service广播，否则忽略
+    SEVT_CONNECT  : [接收]新的网络会话建立，如果使用UDP或UNIX Package此时Data可能会有数据
+    SEVT_DOWN     : [接收]会话已关闭，Data中可能包含缓存中最后的数据
+    SEVT_TEST     : [发送]会话生命周期检测，用于看门狗时钟检测会话是否通信超时，事件的Data将被忽略
+    SEVT_TERM     : [发送]发送最后一个数据帧，发送完成后关闭该会话
+    SEVT_SENTFAL  : [接收]由于网络错误等原因数据发送失败时，该事件广播退回发送的数据
+
++ type Session_i interface {
+    GetID() uuid.UUID_t
+    GetAddr() string
+    GetLife() time.Time
+  }
+  用于访问网络会话基本属性的接口。
+  GetID()   : 获得会话ID
+  GetAddr() : 获得会话来源的地址信息
+  GetLife() : 获得会话当前的超时时间
+
++ func GetModuleID() uuid.UUID_t
+  获得当前进程中网络模块实例的UUID，该UUID存储于模块变量中，可以作为当前进程树的唯一标识
+
++ func GetNetworkIDGenerator(proto NetType) func(mode uuid.UUID_t) func(addr string) uuid.UUID_t
+  用于生成网络对象的UUID，该方法为柯里化函数形态
+  proto   : 网络类型，可用的取值为NT_TCP、NT_UDP、NT_UNIX和NT_UNIXPACK
+  mode    : 网络模块实例的UUID，一般直接取“GetModuleID()”函数的返回值
+  addr    : 网络地址
+  返回：
+  生成的网络对象UUID，由于使用UUID5生成，因此可以为其他非耦合逻辑重演，实现自动匹配
+===================================================================================================
+
+===================================================================================================
+包："github.com/fiathux/wsdc-wdk-go/kotomiMsg
+
+---------------------------------------------------------------------------------------------------
++ func kotomiMsg.BeginService(
+    protocol_name string,
+    host_address string,
+    default_life *time.Duration,
+  ) uuid.UUID
+  启动一个新的网络侦听
+  protocol_name : 使用的网络通信协议，可以是"udp"、"tcp"、"unix"和"unixpacket"
+  host_address  : 侦听的地址，如果是TCP/IP协议族，使用host:port格式，UNIX套接字则使用文件域
+  default_life  : 连接会话无数据时的默认生命周期，使用指针传入nil时使用默认值（30秒）
+  返回：
+  返回侦听Service对象的UUID,该UUID由iohub.GetNetworkIDGenerator函数生成，可以在解耦状态下重演并匹配
+  如果返回的Null UUID，则说明创建侦听失败
+
+  * 注意：如果使用UNIX套接字服务，系统将自动创建制定目录下的域，如果程序未能按正确流程结束，该文件
+  会一直存在并造成侦听失败，惟有手动删除。因此当程序结束时应当调用“CloseService”方法，并等待该方法
+  返回后，再安全的结束程序
+
++ func CloseService(id uuid.UUID_t) bool
+  关闭一个已经打开的Service对象，侦听的IO、所有已经连接的IO都将被关闭，只有所有IO都关闭后函数才会返
+  回。目前关闭Service必须要手动结束所有针对Service的订阅，Service才能关闭。
+  id  : 指定要结束的Service的UUID
+  返回：
+  成功结束返回true，如果该Service不存在或者还有未清除的订阅关系则返回false
+
++ func BindCallback(proc func(frm *iohub.Frame_t),serv uuid.UUID_t) uuid.UUID_t
+  订阅指定Service的数据，绑定到指定的回调函数。每一个订阅者都有独立的数据处理队列，程序保证每一个订
+  阅者收取数据的时序。
+  proc  : 处理来自网络的“iohub.Frame_t”逻辑帧的回调函数
+  serv  : 要订阅的Service UUID
+  返回：
+  分配给订阅者的唯一标识UUID，如果指定的Service不存在则UUID为Null
+
++ func RemoveCall(id uuid.UUID_t)
+  取消一个消息订阅
+  id  : 由“BindCallback”分配给订阅者的UUID
+
++ func WriteTo(service uuid.UUID_t,session uuid.UUID_t,data []byte) bool
+  向指定Service下的指定会话发送数据
+  service : Service对象的UUID
+  session : 该Service下的网络会话UUID
+  data    : 要写入的数据
+  返回：
+  如果数据成功加入发送队列则返回true，如果指定的Service或会话不存在则返回false
+
++ func QuickBindTrack(rule string,name string,servA uuid.UUID_t,servB uuid.UUID_t) uuid.UUID_t
+  （预览特性）绑定一个数据通道，在两个Service之间互通数据
+  rule  : 绑定规则，目前只支持"T"（直接数据互通）和"C"（客户、模块协议转换），参考前文的示例
+  name  : 给Track指定的名称，该名称主要是为未来用户远程维护时提供更好可阅读信息
+  servA : 绑定的服务A，使用“C”规则时，该服务收发外源数据流
+  servB : 绑定的服务B，使用“C”规则时，该服务收发具有明确数据流向的模块间协议帧
+  返回：
+  成功时返回分配给数据通道的唯一标识UUID，如果指定服务不存在则UUID为Null
+
++ func RemoveTrack(id uuid.UUID_t)
+  （预览特性）解除数据通道绑定。
+  id    : 指定由QuickBindTrack分配的通道UUID
+===================================================================================================

@@ -393,6 +393,7 @@ func BindCallback(proc func(frm *iohub.Frame_t),serv uuid.UUID_t) uuid.UUID_t {
     callid := svrObj.RegReader(proc)
     tabCallback[callid] = svrObj
     serviceRefAdd(serv)
+    idchan <- callid
   })
   return <-idchan// }}}
 }
@@ -425,10 +426,11 @@ func RemoveCall(id uuid.UUID_t) {
 func CloseService(id uuid.UUID_t) bool {
   oprst := make(chan bool)// {{{
   go uniqueDecorator(func(){
-    _,have := tabService[id]
+    svr,have := tabService[id]
     if have {
       _,noref := tabServiceRef[id]
       if !noref {
+        svr.Terminate()
         oprst <- true
         return
       }
